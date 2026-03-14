@@ -28,9 +28,9 @@ class BatteryPredictionUiFormatterTest {
     }
 
     @Test
-    fun idleOrUnrealistic_showsBatteryStable_whenHoursAbove48() {
-        val text = BatteryPredictionUiFormatter.remainingText(sampleCount = 20, rawPredictedHours = 48.01)
-        assertEquals("Battery Stable", text)
+    fun idleOrUnrealistic_showsCalculating_whenHoursAbove24() {
+        val text = BatteryPredictionUiFormatter.remainingText(sampleCount = 20, rawPredictedHours = 24.01)
+        assertEquals("Calculating...", text)
     }
 
     @Test

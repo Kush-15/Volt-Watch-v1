@@ -1,10 +1,14 @@
 package com.example.myapplication
 
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
+import android.os.BatteryManager
 import android.util.Log
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -46,7 +50,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var batteryGraph: BatteryGraphView
 
     private var samplingJob: Job? = null
+    private var predictionJob: Job? = null
     private var promptedUsageAccess = false
+    private var wasChargingInPreviousTick = false
 
     private val minSamplesToFit = 6
     private val samplingIntervalMs = 30_000L // Short interval for quick testing; set to 300_000L for 5 minutes.
@@ -90,6 +96,34 @@ class MainActivity : AppCompatActivity() {
 
         samplingJob = lifecycleScope.launch {
             while (isActive) {
+                val isCharging = isDeviceCharging()
+                if (isCharging) {
+                    wasChargingInPreviousTick = true
+                    predictionJob?.cancel()
+                    withContext(Dispatchers.Main) {
+                        batteryStatusText.text = "⚡ Charging..."
+                        timeRemainingText.text = "⚡ Charging..."
+                        todText.text = ""
+                        sampleCountText.text = "Sampling paused"
+                    }
+                    delay(samplingIntervalMs)
+                    continue
+                }
+
+                if (wasChargingInPreviousTick) {
+                    wasChargingInPreviousTick = false
+                    withContext(Dispatchers.IO) {
+                        dao.clearAllSamples()
+                    }
+                    withContext(Dispatchers.Main) {
+                        sampleCountText.text = "0/$minSamplesToFit samples"
+                        timeRemainingText.text = "Learning your habits..."
+                        todText.text = ""
+                        batteryGraph.setData(emptyList(), null)
+                    }
+                    Log.d(LOG_TAG, "Device unplugged - cleared OLS samples to restart learning")
+                }
+
                 if (isFeatureEnabled(2) && !sampler.hasUsageAccess()) {
                     if (!promptedUsageAccess) {
                         promptedUsageAccess = true
@@ -122,10 +156,10 @@ class MainActivity : AppCompatActivity() {
 
                     updatePrediction()
                 } else {
-                    // Device is charging
+                    // Sampling unavailable while unplugged (rare transient): keep UI conservative.
                     withContext(Dispatchers.Main) {
-                        batteryStatusText.text = "Charging ⚡"
-                        timeRemainingText.text = "Charging"
+                        batteryStatusText.text = "Calculating..."
+                        timeRemainingText.text = "Calculating..."
                         todText.text = ""
                     }
                 }
@@ -138,10 +172,13 @@ class MainActivity : AppCompatActivity() {
     private fun stopSampling() {
         samplingJob?.cancel()
         samplingJob = null
+        predictionJob?.cancel()
+        predictionJob = null
     }
 
     private fun updatePrediction() {
-        lifecycleScope.launch {
+        predictionJob?.cancel()
+        predictionJob = lifecycleScope.launch {
             try {
                 val sevenDaysAgoMillis = System.currentTimeMillis() - sevenDaysMillis
                 val samples = withContext(Dispatchers.IO) {
@@ -199,12 +236,14 @@ class MainActivity : AppCompatActivity() {
                         rawPredictedHours > 0.0 &&
                         rawPredictedHours <= BatteryPredictionUiFormatter.UNREALISTIC_HOURS_THRESHOLD
 
-                    if (isNormalRangePrediction && tDeathEpochMillis != null) {
-                        todText.text = "Dies at ${formatAbsoluteTime(tDeathEpochMillis)}"
+                    if (isNormalRangePrediction) {
+                        todText.text = "Dies at ${formatAbsoluteTime(tDeathEpochMillis!!)}"
                     } else {
                         todText.text = ""
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(LOG_TAG, "Error updating prediction", e)
                 withContext(Dispatchers.Main) {
@@ -280,6 +319,13 @@ class MainActivity : AppCompatActivity() {
     private fun isFeatureEnabled(bit: Int): Boolean {
         if (bit == 0) return true
         return featureMask and (1 shl bit) != 0
+    }
+
+    private fun isDeviceCharging(): Boolean {
+        val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        return status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
     }
 
     // ── Formatting helpers ──────────────────────────────────────────────────

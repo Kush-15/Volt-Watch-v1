@@ -8,7 +8,7 @@ import kotlin.math.floor
  */
 object BatteryPredictionUiFormatter {
     const val COLD_START_MIN_SAMPLES = 20
-    const val UNREALISTIC_HOURS_THRESHOLD = 48.0
+    const val UNREALISTIC_HOURS_THRESHOLD = 24.0
 
     fun remainingText(sampleCount: Int, rawPredictedHours: Double?): String {
         if (sampleCount < COLD_START_MIN_SAMPLES) {
@@ -21,7 +21,7 @@ object BatteryPredictionUiFormatter {
         }
 
         if (hours > UNREALISTIC_HOURS_THRESHOLD) {
-            return "Battery Stable"
+            return "Calculating..."
         }
 
         val totalMinutes = floor(hours * 60.0).toInt().coerceAtLeast(0)
