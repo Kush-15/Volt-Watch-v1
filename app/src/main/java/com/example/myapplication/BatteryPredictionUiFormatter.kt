@@ -2,12 +2,11 @@ package com.example.myapplication
 
 import kotlin.math.floor
 
-/**
- * Presentation-only mapper for remaining-time labels.
- * Keeps filtering rules in UI layer without changing OLS or persistence logic.
- */
 object BatteryPredictionUiFormatter {
-    const val COLD_START_MIN_SAMPLES = 20
+    // Lowered from 20 → 6 to match minSamplesToFit.  After unplugging, the OLS
+    // session window resets, so we want predictions to appear quickly once there
+    // is enough data.  The 24-hour sanity filter still guards against wild numbers.
+    const val COLD_START_MIN_SAMPLES = 6
     const val UNREALISTIC_HOURS_THRESHOLD = 24.0
 
     fun remainingText(sampleCount: Int, rawPredictedHours: Double?): String {
@@ -21,7 +20,7 @@ object BatteryPredictionUiFormatter {
         }
 
         if (hours > UNREALISTIC_HOURS_THRESHOLD) {
-            return "Calculating..."
+            return "24h+ remaining"
         }
 
         val totalMinutes = floor(hours * 60.0).toInt().coerceAtLeast(0)

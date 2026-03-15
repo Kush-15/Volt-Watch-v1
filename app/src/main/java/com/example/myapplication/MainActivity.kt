@@ -1,9 +1,12 @@
 package com.example.myapplication
 
 import android.content.Intent
-import android.content.IntentFilter
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.BatteryManager
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -22,19 +25,23 @@ import java.util.concurrent.TimeUnit
 
 private const val LOG_TAG = "MainActivity"
 
-/**
- * MainActivity for battery prediction.
- *
- * Responsibilities:
- * 1. Sample battery telemetry via BatterySampler
- * 2. Persist samples to Room database (with 7-day retention)
- * 3. Train OLS model on historical samples using Dispatchers.Default
- * 4. Calculate TOD (Time of Death) with safe slope handling
- * 5. Update UI on Dispatchers.Main
- *
- * Feature mask: bit0=time (required), bit1=voltage, bit2=services
- */
 class MainActivity : AppCompatActivity() {
+
+    // Cached colors — avoids Color.parseColor() on every UI refresh
+    private companion object {
+        val COLOR_GREEN  = android.graphics.Color.parseColor("#00C853")
+        val COLOR_AMBER  = android.graphics.Color.parseColor("#FF9800")
+        val COLOR_RED    = android.graphics.Color.parseColor("#FF1744")
+
+        private const val PREFS_NAME = "battery_prediction_prefs"
+        private const val KEY_LAST_GOOD_HOURS = "last_good_hours"
+        private const val KEY_LAST_GOOD_AT_MS = "last_good_at_ms"
+        private const val KEY_OPT_PROMPTED = "battery_opt_prompted"
+        private val LAST_GOOD_MAX_AGE_MS = TimeUnit.HOURS.toMillis(12)
+        private const val CHARGE_SPIKE_THRESHOLD_PCT = 1.0f
+        private const val UI_CAP_HOURS_WHEN_FLAT = 25.0
+    }
+
     private val regression = OlsRegression()
     private lateinit var sampler: BatterySampler
     private lateinit var database: BatteryDatabase
@@ -54,18 +61,25 @@ class MainActivity : AppCompatActivity() {
     private var promptedUsageAccess = false
     private var wasChargingInPreviousTick = false
 
+    /**
+     * Epoch ms when the current discharge session started (set when the phone is unplugged).
+     * 0 means no charging transition observed this session — use full 7-day history for OLS.
+     */
+    private var sessionStartTimeMs: Long = 0L
+
     private val minSamplesToFit = 6
-    private val samplingIntervalMs = 30_000L // Short interval for quick testing; set to 300_000L for 5 minutes.
+    private val samplingIntervalMs = 30_000L
     private val sevenDaysMillis = TimeUnit.DAYS.toMillis(7)
 
-    // Feature mask: bit0=time (required), bit1=voltage, bit2=services
-    private val featureMask = 0b111
+    // Feature mask: bit0=time (required), bit1=voltage, bit2=services, bit3=foreground
+    // Keep services/foreground disabled for now because sampling currently runs only while
+    // MainActivity is foreground, which makes those columns mostly constant/noisy.
+    private val featureMask = 0b011
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Bind views
         batteryIcon        = findViewById(R.id.batteryIcon)
         batteryPercentText = findViewById(R.id.batteryPercentText)
         batteryStatusText  = findViewById(R.id.batteryStatusText)
@@ -74,11 +88,11 @@ class MainActivity : AppCompatActivity() {
         sampleCountText    = findViewById(R.id.sampleCountText)
         batteryGraph       = findViewById(R.id.batteryGraph)
 
-        // Initialize database
         database = BatteryDatabase.getInstance(applicationContext)
         dao = database.batterySampleDao()
 
-        sampler = BatterySampler(this, "com.example.myapplication.SampleForegroundService")
+        sampler = BatterySampler(this, BatteryLoggingForegroundService::class.java.name)
+        promptIgnoreBatteryOptimizationsIfNeeded()
     }
 
     override fun onResume() {
@@ -96,32 +110,34 @@ class MainActivity : AppCompatActivity() {
 
         samplingJob = lifecycleScope.launch {
             while (isActive) {
-                val isCharging = isDeviceCharging()
-                if (isCharging) {
+                // ── Single IPC call: read battery state + get sample in one shot ──
+                val sample = sampler.sample()   // also sets sampler.isCharging
+
+                if (sampler.isCharging) {
                     wasChargingInPreviousTick = true
                     predictionJob?.cancel()
                     withContext(Dispatchers.Main) {
                         batteryStatusText.text = "⚡ Charging..."
-                        timeRemainingText.text = "⚡ Charging..."
-                        todText.text = ""
-                        sampleCountText.text = "Sampling paused"
+                        timeRemainingText.text  = "⚡ Charging..."
+                        todText.text            = ""
+                        sampleCountText.text    = "Sampling paused"
                     }
                     delay(samplingIntervalMs)
                     continue
                 }
 
+                // ── Charging → discharging transition ──
                 if (wasChargingInPreviousTick) {
                     wasChargingInPreviousTick = false
-                    withContext(Dispatchers.IO) {
-                        dao.clearAllSamples()
-                    }
+                    // Start a new session window so the OLS model only sees fresh
+                    // post-charge data, WITHOUT deleting historical graph data.
+                    sessionStartTimeMs = System.currentTimeMillis()
                     withContext(Dispatchers.Main) {
-                        sampleCountText.text = "0/$minSamplesToFit samples"
+                        sampleCountText.text   = "0/$minSamplesToFit samples"
                         timeRemainingText.text = "Learning your habits..."
-                        todText.text = ""
-                        batteryGraph.setData(emptyList(), null)
+                        todText.text           = ""
                     }
-                    Log.d(LOG_TAG, "Device unplugged - cleared OLS samples to restart learning")
+                    Log.d(LOG_TAG, "Device unplugged — new session started at $sessionStartTimeMs")
                 }
 
                 if (isFeatureEnabled(2) && !sampler.hasUsageAccess()) {
@@ -131,9 +147,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                val sample = sampler.sample()
                 if (sample != null) {
-                    // Update battery icon and percentage immediately
                     withContext(Dispatchers.Main) {
                         val pct = sample.batteryLevel
                         batteryIcon.setLevel(pct)
@@ -142,25 +156,20 @@ class MainActivity : AppCompatActivity() {
                         batteryStatusText.text = batteryStatusLabel(pct)
                     }
 
-                    // Persist sample and prune old data
                     withContext(Dispatchers.IO) {
                         val id = dao.insertSample(sample)
-                        Log.d(LOG_TAG, "Sample inserted with id=$id at ${sample.timestampEpochMillis}")
-
-                        val cutoffEpochMillis = System.currentTimeMillis() - sevenDaysMillis
-                        val deletedCount = dao.deleteOlderThan(cutoffEpochMillis)
-                        if (deletedCount > 0) {
-                            Log.d(LOG_TAG, "Pruned $deletedCount old samples")
-                        }
+                        Log.d(LOG_TAG, "Sample inserted id=$id at ${sample.timestampEpochMillis}")
+                        val cutoff = System.currentTimeMillis() - sevenDaysMillis
+                        val deleted = dao.deleteOlderThan(cutoff)
+                        if (deleted > 0) Log.d(LOG_TAG, "Pruned $deleted old samples")
                     }
 
                     updatePrediction()
                 } else {
-                    // Sampling unavailable while unplugged (rare transient): keep UI conservative.
                     withContext(Dispatchers.Main) {
                         batteryStatusText.text = "Calculating..."
                         timeRemainingText.text = "Calculating..."
-                        todText.text = ""
+                        todText.text           = ""
                     }
                 }
 
@@ -181,21 +190,32 @@ class MainActivity : AppCompatActivity() {
         predictionJob = lifecycleScope.launch {
             try {
                 val sevenDaysAgoMillis = System.currentTimeMillis() - sevenDaysMillis
-                val samples = withContext(Dispatchers.IO) {
+
+                // Load full 7-day history from DB in one query
+                val allSamples = withContext(Dispatchers.IO) {
                     dao.getSamplesSince(sevenDaysAgoMillis)
                 }
 
-                // Update graph data (regardless of whether we have enough for OLS)
-                val graphPoints = samples.map { Pair(it.timestampEpochMillis, it.batteryLevel) }
+                // Train only on the latest discharge window (after the most recent upward spike).
+                // This prevents mixed charge/discharge history from forcing a non-negative slope.
+                val spikeStartMs = findLastChargeSpikeTimestamp(allSamples)
+                val effectiveStartMs = maxOf(sessionStartTimeMs, spikeStartMs)
+                val olsSamples = if (effectiveStartMs > 0L)
+                    allSamples.filter { it.timestampEpochMillis >= effectiveStartMs }
+                else
+                    allSamples
 
-                if (samples.size < minSamplesToFit) {
+                // Graph always shows full history for context
+                val graphPoints = allSamples.map { Pair(it.timestampEpochMillis, it.batteryLevel) }
+
+                if (olsSamples.size < minSamplesToFit) {
                     withContext(Dispatchers.Main) {
-                        sampleCountText.text = "${samples.size}/$minSamplesToFit samples"
+                        sampleCountText.text   = "${olsSamples.size}/$minSamplesToFit samples"
                         timeRemainingText.text = BatteryPredictionUiFormatter.remainingText(
-                            sampleCount = samples.size,
+                            sampleCount       = olsSamples.size,
                             rawPredictedHours = null
                         )
-                        todText.text = "Need ${minSamplesToFit - samples.size} more reading(s)"
+                        todText.text = "Need ${minSamplesToFit - olsSamples.size} more reading(s)"
                         batteryGraph.setData(graphPoints, null)
                     }
                     return@launch
@@ -204,43 +224,56 @@ class MainActivity : AppCompatActivity() {
                 val nowEpochMillis = System.currentTimeMillis()
 
                 val (xRows, yValues) = withContext(Dispatchers.IO) {
-                    val features = mutableListOf<DoubleArray>()
-                    val labels = mutableListOf<Double>()
-                    val anchorTime = samples.first().timestampEpochMillis
-                    for (sample in samples) {
-                        features.add(buildFeatureVector(sample, anchorTime))
-                        labels.add(sample.batteryLevel.toDouble())
+                    val features   = ArrayList<DoubleArray>(olsSamples.size)
+                    val labels     = DoubleArray(olsSamples.size)
+                    val anchorTime = olsSamples.first().timestampEpochMillis
+                    olsSamples.forEachIndexed { i, s ->
+                        features.add(buildFeatureVector(s, anchorTime))
+                        labels[i] = s.batteryLevel.toDouble()
                     }
-                    Pair(features.toTypedArray(), labels.toDoubleArray())
+                    Pair(features.toTypedArray(), labels)
                 }
 
                 val (_, tDeathEpochMillis) = withContext(Dispatchers.Default) {
-                    fitAndPredict(xRows, yValues, nowEpochMillis, samples.first().timestampEpochMillis)
+                    fitAndPredict(xRows, yValues, nowEpochMillis)
                 }
 
                 withContext(Dispatchers.Main) {
-                    sampleCountText.text = "${samples.size} samples"
+                    sampleCountText.text = "${olsSamples.size} samples"
                     batteryGraph.setData(graphPoints, tDeathEpochMillis)
 
                     val rawPredictedHours = tDeathEpochMillis?.let {
                         (it - nowEpochMillis) / 3_600_000.0
                     }
-                    val remainingText = BatteryPredictionUiFormatter.remainingText(
-                        sampleCount = samples.size,
-                        rawPredictedHours = rawPredictedHours
-                    )
-                    timeRemainingText.text = remainingText
 
-                    val isNormalRangePrediction = samples.size >= BatteryPredictionUiFormatter.COLD_START_MIN_SAMPLES &&
+                    val effectiveHoursForUi = if (
+                        rawPredictedHours != null &&
+                        rawPredictedHours > 0.0 &&
+                        rawPredictedHours <= BatteryPredictionUiFormatter.UNREALISTIC_HOURS_THRESHOLD
+                    ) {
+                        saveLastGoodPrediction(rawPredictedHours)
+                        rawPredictedHours
+                    } else {
+                        // Warm start: if current session is too flat/noisy, show the most
+                        // recent valid prediction instead of staying in Calculating for long.
+                        readRecentLastGoodPrediction()
+                    }
+
+                    timeRemainingText.text = BatteryPredictionUiFormatter.remainingText(
+                        sampleCount       = olsSamples.size,
+                        rawPredictedHours = effectiveHoursForUi
+                    )
+
+                    val isNormalRange =
+                        olsSamples.size >= BatteryPredictionUiFormatter.COLD_START_MIN_SAMPLES &&
                         rawPredictedHours != null &&
                         rawPredictedHours > 0.0 &&
                         rawPredictedHours <= BatteryPredictionUiFormatter.UNREALISTIC_HOURS_THRESHOLD
 
-                    if (isNormalRangePrediction) {
-                        todText.text = "Dies at ${formatAbsoluteTime(tDeathEpochMillis!!)}"
-                    } else {
-                        todText.text = ""
-                    }
+                    todText.text = if (isNormalRange)
+                        "Dies at ${formatAbsoluteTime(tDeathEpochMillis!!)}"
+                    else
+                        ""
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -248,70 +281,55 @@ class MainActivity : AppCompatActivity() {
                 Log.e(LOG_TAG, "Error updating prediction", e)
                 withContext(Dispatchers.Main) {
                     timeRemainingText.text = "Error"
-                    todText.text = e.message ?: "Unknown error"
+                    todText.text           = e.message ?: "Unknown error"
                 }
             }
         }
     }
 
-    /**
-     * Fit model and compute TOD prediction.
-     * Runs on Dispatchers.Default for CPU-intensive OLS fitting.
-     */
     private suspend fun fitAndPredict(
         xRows: Array<DoubleArray>,
         yValues: DoubleArray,
-        nowEpochMillis: Long,
-        anchorTimeMs: Long
+        nowEpochMillis: Long
     ): Pair<Double?, Long?> = withContext(Dispatchers.Default) {
-        val fitted = regression.fit(xRows, yValues)
-        if (!fitted) return@withContext Pair(null, null)
-        if (xRows.isEmpty()) return@withContext Pair(null, null)
+        if (!regression.fit(xRows, yValues) || xRows.isEmpty())
+            return@withContext Pair(null, null)
 
         val currentBatteryPercent = yValues.last()
-
         val slope = regression.slopeForFeature(0)
-        Log.d(LOG_TAG, "Slope (pp/min): $slope, Current battery: $currentBatteryPercent%")
+        Log.d(LOG_TAG, "Slope (pp/min): $slope, Battery: $currentBatteryPercent%")
 
         if (slope == null || slope >= 0.0) {
-            Log.d(LOG_TAG, "Slope is null or non-negative (battery not draining or sensor noise)")
-            return@withContext Pair(currentBatteryPercent, null)
+            Log.d(LOG_TAG, "Non-negative slope — showing capped estimate instead of perpetual Calculating")
+            val cappedTDeath = nowEpochMillis + (UI_CAP_HOURS_WHEN_FLAT * 3_600_000.0).toLong()
+            return@withContext Pair(currentBatteryPercent, cappedTDeath)
         }
-
         if (currentBatteryPercent <= 0.0) {
-            Log.w(LOG_TAG, "Current battery <= 0%, device likely already dead")
+            Log.w(LOG_TAG, "Battery ≤ 0% — device likely dead")
             return@withContext Pair(currentBatteryPercent, null)
         }
 
-        val minutesToEmpty = currentBatteryPercent / -slope
-        val millisToEmpty = (minutesToEmpty * 60000.0).toLong()
-        val tDeathEpochMillis = nowEpochMillis + millisToEmpty
+        val millisToEmpty  = ((currentBatteryPercent / -slope) * 60_000.0).toLong()
+        val tDeathEpochMs  = nowEpochMillis + millisToEmpty
 
-        if (tDeathEpochMillis <= nowEpochMillis) {
-            Log.w(LOG_TAG, "Computed TOD is in the past (data anomaly)")
+        if (tDeathEpochMs <= nowEpochMillis) {
+            Log.w(LOG_TAG, "TOD in the past — data anomaly")
+            return@withContext Pair(currentBatteryPercent, null)
+        }
+        if (tDeathEpochMs > nowEpochMillis + TimeUnit.DAYS.toMillis(30)) {
+            Log.w(LOG_TAG, "TOD > 30 days — model unreliable")
             return@withContext Pair(currentBatteryPercent, null)
         }
 
-        val maxReasonableFutureMs = nowEpochMillis + TimeUnit.DAYS.toMillis(30)
-        if (tDeathEpochMillis > maxReasonableFutureMs) {
-            Log.w(LOG_TAG, "Computed TOD > 30 days in future (model unreliable)")
-            return@withContext Pair(currentBatteryPercent, null)
-        }
-
-        Log.d(LOG_TAG, "TOD computed: ${formatAbsoluteTime(tDeathEpochMillis)}")
-        return@withContext Pair(currentBatteryPercent, tDeathEpochMillis)
+        Log.d(LOG_TAG, "TOD: ${formatAbsoluteTime(tDeathEpochMs)}")
+        Pair(currentBatteryPercent, tDeathEpochMs)
     }
 
     private fun buildFeatureVector(sample: BatterySample, anchorTimeMs: Long): DoubleArray {
         val values = ArrayList<Double>(4)
-        // Feature 0: Time in minutes (always enabled)
-        val minutesSinceStart = (sample.timestampEpochMillis - anchorTimeMs) / 60000.0
-        values.add(minutesSinceStart)
-        // Feature 1: Voltage
+        values.add((sample.timestampEpochMillis - anchorTimeMs) / 60_000.0)
         if (isFeatureEnabled(1)) values.add(sample.voltage.toDouble())
-        // Feature 2: Services active
         if (isFeatureEnabled(2)) values.add(if (sample.servicesActive) 1.0 else 0.0)
-        // Feature 3: Foreground
         if (isFeatureEnabled(3)) values.add(if (sample.foreground) 1.0 else 0.0)
         return values.toDoubleArray()
     }
@@ -321,33 +339,77 @@ class MainActivity : AppCompatActivity() {
         return featureMask and (1 shl bit) != 0
     }
 
-    private fun isDeviceCharging(): Boolean {
-        val batteryIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-        return status == BatteryManager.BATTERY_STATUS_CHARGING ||
-            status == BatteryManager.BATTERY_STATUS_FULL
-    }
-
     // ── Formatting helpers ──────────────────────────────────────────────────
 
+    private fun formatAbsoluteTime(timestampMs: Long): String =
+        SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestampMs))
 
-    private fun formatAbsoluteTime(timestampMs: Long): String {
-        val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
-        return formatter.format(Date(timestampMs))
+    private fun batteryColor(level: Float) = when {
+        level > 50f -> COLOR_GREEN
+        level > 20f -> COLOR_AMBER
+        else        -> COLOR_RED
     }
 
-    private fun batteryColor(level: Float): Int {
-        return when {
-            level > 50f -> android.graphics.Color.parseColor("#00C853")
-            level > 20f -> android.graphics.Color.parseColor("#FF9800")
-            else        -> android.graphics.Color.parseColor("#FF1744")
-        }
-    }
-
-    private fun batteryStatusLabel(level: Float): String = when {
+    private fun batteryStatusLabel(level: Float) = when {
         level > 80f -> "Good"
         level > 50f -> "Normal"
         level > 20f -> "Low battery"
         else        -> "Critical ⚠️"
+    }
+
+    private fun findLastChargeSpikeTimestamp(samples: List<BatterySample>): Long {
+        if (samples.size < 2) return 0L
+        var spikeStart = 0L
+        for (i in 1 until samples.size) {
+            val delta = samples[i].batteryLevel - samples[i - 1].batteryLevel
+            if (delta >= CHARGE_SPIKE_THRESHOLD_PCT) {
+                spikeStart = samples[i].timestampEpochMillis
+            }
+        }
+        return spikeStart
+    }
+
+    private fun saveLastGoodPrediction(hours: Double) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .putFloat(KEY_LAST_GOOD_HOURS, hours.toFloat())
+            .putLong(KEY_LAST_GOOD_AT_MS, System.currentTimeMillis())
+            .apply()
+    }
+
+    private fun readRecentLastGoodPrediction(): Double? {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        val savedAt = prefs.getLong(KEY_LAST_GOOD_AT_MS, 0L)
+        if (savedAt <= 0L || (System.currentTimeMillis() - savedAt) > LAST_GOOD_MAX_AGE_MS) {
+            return null
+        }
+
+        val value = prefs.getFloat(KEY_LAST_GOOD_HOURS, -1f).toDouble()
+        return if (value > 0.0 && value <= BatteryPredictionUiFormatter.UNREALISTIC_HOURS_THRESHOLD) {
+            value
+        } else {
+            null
+        }
+    }
+
+    private fun promptIgnoreBatteryOptimizationsIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+
+        val powerManager = getSystemService(PowerManager::class.java) ?: return
+        if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
+
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_OPT_PROMPTED, false)) return
+
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:$packageName")
+        }
+
+        try {
+            startActivity(intent)
+            prefs.edit().putBoolean(KEY_OPT_PROMPTED, true).apply()
+        } catch (e: Exception) {
+            Log.w(LOG_TAG, "Unable to open battery optimization exemption screen", e)
+        }
     }
 }

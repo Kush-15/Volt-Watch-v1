@@ -42,6 +42,7 @@ android {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
