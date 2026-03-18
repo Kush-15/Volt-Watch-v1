@@ -80,7 +80,8 @@ class BatteryLoggingForegroundService : Service() {
                     batteryLevel = batteryPercent,
                     voltage = voltageMv,
                     servicesActive = true,
-                    foreground = false
+                    foreground = false,
+                    isCharging = false
                 )
             )
             dao.deleteOlderThan(now - TimeUnit.DAYS.toMillis(7))

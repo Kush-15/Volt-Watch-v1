@@ -56,7 +56,8 @@ class BatterySamplingWorker(
                 batteryLevel = batteryPercent.toFloat(),
                 voltage = voltageMv,
                 servicesActive = true,
-                foreground = false
+                foreground = false,
+                isCharging = false
             )
 
             val dao = BatteryDatabase.getInstance(applicationContext).batterySampleDao()

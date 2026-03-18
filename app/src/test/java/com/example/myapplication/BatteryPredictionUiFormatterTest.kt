@@ -6,8 +6,8 @@ import org.junit.Test
 class BatteryPredictionUiFormatterTest {
 
     @Test
-    fun coldStart_showsLearningMessage_whenSampleCountBelow20() {
-        val text = BatteryPredictionUiFormatter.remainingText(sampleCount = 19, rawPredictedHours = 3.5)
+    fun coldStart_showsLearningMessage_whenSampleCountBelowConfiguredThreshold() {
+        val text = BatteryPredictionUiFormatter.remainingText(sampleCount = 5, rawPredictedHours = 3.5)
         assertEquals("Learning your habits...", text)
     }
 

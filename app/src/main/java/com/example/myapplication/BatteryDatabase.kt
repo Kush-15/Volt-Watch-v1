@@ -2,6 +2,7 @@ package com.example.myapplication
 
 import android.content.Context
 import androidx.room.Database
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -11,6 +12,8 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -46,7 +49,10 @@ data class BatterySample(
 
     val servicesActive: Boolean,
 
-    val foreground: Boolean = false
+    val foreground: Boolean = false,
+
+    @ColumnInfo(name = "is_charging")
+    val isCharging: Boolean = false
 )
 
 @Dao
@@ -56,6 +62,33 @@ interface BatterySampleDao {
 
     @Query("SELECT * FROM batterysample WHERE timestampEpochMillis >= :sinceEpochMillis ORDER BY timestampEpochMillis ASC")
     suspend fun getSamplesSince(sinceEpochMillis: Long): List<BatterySample>
+
+    @Query(
+        "SELECT * FROM batterysample WHERE is_charging = 0 ORDER BY timestampEpochMillis DESC LIMIT 100"
+    )
+    suspend fun getLast100NonChargingSamples(): List<BatterySample>
+
+    @Query("DELETE FROM batterysample WHERE is_charging = 1")
+    suspend fun deleteChargingRows(): Int
+
+    @Query(
+        """
+        DELETE FROM batterysample
+        WHERE id IN (
+            SELECT cur.id
+            FROM batterysample AS cur
+            JOIN batterysample AS prev
+              ON prev.timestampEpochMillis = (
+                    SELECT MAX(p.timestampEpochMillis)
+                    FROM batterysample AS p
+                    WHERE p.timestampEpochMillis < cur.timestampEpochMillis
+                )
+            WHERE cur.is_charging = 0
+              AND cur.batteryLevel > prev.batteryLevel + :spikeThresholdPercent
+        )
+        """
+    )
+    suspend fun deleteOrphanUpwardSpikes(spikeThresholdPercent: Float): Int
 
 
     @Query("DELETE FROM batterysample WHERE timestampEpochMillis < :cutoffEpochMillis")
@@ -77,13 +110,21 @@ interface BatterySampleDao {
 
 @Database(
     entities = [BatterySample::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class BatteryDatabase : RoomDatabase() {
     abstract fun batterySampleDao(): BatterySampleDao
 
     companion object {
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE batterysample ADD COLUMN is_charging INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
         @Volatile
         private var instance: BatteryDatabase? = null
 
@@ -93,7 +134,10 @@ abstract class BatteryDatabase : RoomDatabase() {
                     context.applicationContext,
                     BatteryDatabase::class.java,
                     "battery_database"
-                ).build().also { instance = it }
+                )
+                    .addMigrations(MIGRATION_1_2)
+                    .build()
+                    .also { instance = it }
             }
         }
     }

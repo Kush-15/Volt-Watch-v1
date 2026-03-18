@@ -92,7 +92,8 @@ class BatterySampler(
             batteryLevel = batteryPercent.toFloat(),
             voltage = voltageMv,
             servicesActive = servicesActive,
-            foreground = foreground
+            foreground = foreground,
+            isCharging = false
         )
     }
 
