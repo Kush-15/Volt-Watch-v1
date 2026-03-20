@@ -60,13 +60,16 @@ interface BatterySampleDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSample(sample: BatterySample): Long
 
+    @Query("SELECT * FROM batterysample ORDER BY timestampEpochMillis DESC LIMIT 1")
+    suspend fun getLatestSample(): BatterySample?
+
     @Query("SELECT * FROM batterysample WHERE timestampEpochMillis >= :sinceEpochMillis ORDER BY timestampEpochMillis ASC")
     suspend fun getSamplesSince(sinceEpochMillis: Long): List<BatterySample>
 
     @Query(
-        "SELECT * FROM batterysample WHERE is_charging = 0 ORDER BY timestampEpochMillis DESC LIMIT 100"
+        "SELECT * FROM batterysample WHERE is_charging = 0 ORDER BY timestampEpochMillis DESC LIMIT 50"
     )
-    suspend fun getLast100NonChargingSamples(): List<BatterySample>
+    suspend fun getLast50NonChargingSamples(): List<BatterySample>
 
     @Query("DELETE FROM batterysample WHERE is_charging = 1")
     suspend fun deleteChargingRows(): Int
@@ -84,11 +87,15 @@ interface BatterySampleDao {
                     WHERE p.timestampEpochMillis < cur.timestampEpochMillis
                 )
             WHERE cur.is_charging = 0
-              AND cur.batteryLevel > prev.batteryLevel + :spikeThresholdPercent
+              AND prev.is_charging = 0
+              AND (
+                    cur.batteryLevel > prev.batteryLevel
+                 OR cur.voltage > prev.voltage
+              )
         )
         """
     )
-    suspend fun deleteOrphanUpwardSpikes(spikeThresholdPercent: Float): Int
+    suspend fun deleteOrphanUpwardSpikes(): Int
 
 
     @Query("DELETE FROM batterysample WHERE timestampEpochMillis < :cutoffEpochMillis")

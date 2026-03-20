@@ -19,7 +19,12 @@ class BatteryRepository(
     )
 
     suspend fun insertSample(sample: BatterySample): Long = withContext(ioDispatcher) {
-        dao.insertSample(sample)
+        val latest = dao.getLatestSample()
+        if (latest == null || sample.batteryLevel < latest.batteryLevel) {
+            dao.insertSample(sample)
+        } else {
+            INSERT_SKIPPED_ID
+        }
     }
 
     suspend fun pruneOlderThan(cutoffEpochMillis: Long): Int = withContext(ioDispatcher) {
@@ -31,20 +36,19 @@ class BatteryRepository(
     }
 
     /**
-     * Fetches the latest 100 discharging points from Room and returns them in chronological order.
+     * Fetches the latest 50 discharging points from Room and returns them in chronological order.
      */
     suspend fun getRecentDischargingWindow(): List<BatterySample> = withContext(ioDispatcher) {
-        val chronological = dao.getLast100NonChargingSamples().asReversed()
+        val chronological = dao.getLast50NonChargingSamples().asReversed()
         keepMostRecentContinuousDischargeBlock(chronological)
     }
 
     /**
      * One-time historical cleanup for existing dirty logs.
      */
-    suspend fun cleanupHistoricalData(spikeThresholdPercent: Float = ORPHAN_SPIKE_THRESHOLD_PERCENT): CleanupResult =
-        withContext(ioDispatcher) {
+    suspend fun cleanupHistoricalData(): CleanupResult = withContext(ioDispatcher) {
             val removedCharging = dao.deleteChargingRows()
-            val removedSpikes = dao.deleteOrphanUpwardSpikes(spikeThresholdPercent)
+            val removedSpikes = dao.deleteOrphanUpwardSpikes()
             CleanupResult(
                 deletedChargingRows = removedCharging,
                 deletedOrphanSpikes = removedSpikes
@@ -75,8 +79,8 @@ class BatteryRepository(
     }
 
     companion object {
+        const val INSERT_SKIPPED_ID = -1L
         private const val ML_UPWARD_TOLERANCE_PERCENT = 0.15f
-        private const val ORPHAN_SPIKE_THRESHOLD_PERCENT = 1.0f
     }
 }
 

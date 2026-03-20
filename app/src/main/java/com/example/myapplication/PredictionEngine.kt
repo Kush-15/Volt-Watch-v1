@@ -39,7 +39,7 @@ class PredictionEngine(
 
     /**
      * Fits y = m*x + b where:
-     * - x: elapsed minutes from the first sample
+     * - x: cumulative elapsed minutes between accepted 1% drop anchors
      * - y: battery percentage
      *
      * Returns the smoothed prediction in hours by averaging the last 5 successful runs.
@@ -47,20 +47,30 @@ class PredictionEngine(
      */
     suspend fun predictRemainingHours(samples: List<BatterySample>): PredictionResult =
         withContext(computeDispatcher) {
-            if (samples.size < 2) {
+            val window = samples.takeLast(OLS_WINDOW_SIZE)
+            val anchors = buildOnePercentDropAnchors(window)
+
+            if (anchors.size < 2) {
                 return@withContext PredictionResult.invalid()
             }
 
-            val firstTime = samples.first().timestampEpochMillis
-            val n = samples.size.toDouble()
+            val n = anchors.size.toDouble()
 
             var sumX = 0.0
             var sumY = 0.0
             var sumXY = 0.0
             var sumX2 = 0.0
+            var elapsedMinutes = 0.0
 
-            for (sample in samples) {
-                val xMinutes = (sample.timestampEpochMillis - firstTime) / 60_000.0
+            for (index in anchors.indices) {
+                val sample = anchors[index]
+                if (index > 0) {
+                    val deltaMs = (sample.timestampEpochMillis - anchors[index - 1].timestampEpochMillis)
+                        .coerceAtLeast(0L)
+                    elapsedMinutes += deltaMs / 60_000.0
+                }
+
+                val xMinutes = elapsedMinutes
                 val y = sample.batteryLevel.toDouble()
                 sumX += xMinutes
                 sumY += y
@@ -86,7 +96,7 @@ class PredictionEngine(
                 )
             }
 
-            val currentBattery = samples.last().batteryLevel.toDouble()
+            val currentBattery = anchors.last().batteryLevel.toDouble()
             val rawMinutesToZero = currentBattery / -slope
             val rawHours = rawMinutesToZero / 60.0
 
@@ -116,8 +126,29 @@ class PredictionEngine(
     companion object {
         const val MIN_RETRAIN_INTERVAL_MS = 300_000L
         const val MIN_RETRAIN_DROP_PERCENT = 2.0f
+        const val OLS_WINDOW_SIZE = 50
         const val SMA_WINDOW_SIZE = 5
         const val INVALID_PREDICTION_HOURS = -1.0
+        private const val MIN_LEVEL_DROP_STEP_PERCENT = 1.0f
+    }
+
+    private fun buildOnePercentDropAnchors(samples: List<BatterySample>): List<BatterySample> {
+        if (samples.isEmpty()) return emptyList()
+
+        val anchors = ArrayList<BatterySample>(samples.size)
+        var lastAnchor = samples.first()
+        anchors.add(lastAnchor)
+
+        for (index in 1 until samples.size) {
+            val candidate = samples[index]
+            val droppedBy = lastAnchor.batteryLevel - candidate.batteryLevel
+            if (droppedBy >= MIN_LEVEL_DROP_STEP_PERCENT) {
+                anchors.add(candidate)
+                lastAnchor = candidate
+            }
+        }
+
+        return anchors
     }
 }
 
