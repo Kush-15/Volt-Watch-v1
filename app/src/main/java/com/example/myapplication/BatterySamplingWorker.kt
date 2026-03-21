@@ -61,10 +61,17 @@ class BatterySamplingWorker(
             )
 
             val dao = BatteryDatabase.getInstance(applicationContext).batterySampleDao()
-            dao.insertSample(sample)
+            val repository = BatteryRepository(dao)
+            val id = repository.insertSample(sample)
+            
+            // Only log insertion if it passed the drop filter
+            if (id > 0) {
+                Log.d(WORKER_LOG_TAG, "Background sample inserted (id=$id) at $now, level=$batteryPercent%")
+            } else {
+                Log.d(WORKER_LOG_TAG, "Background sample skipped (battery not dropped) at $now, level=$batteryPercent%")
+            }
+            
             dao.deleteOlderThan(now - TimeUnit.DAYS.toMillis(7))
-
-            Log.d(WORKER_LOG_TAG, "Background sample inserted at $now")
             Result.success()
         } catch (t: Throwable) {
             Log.e(WORKER_LOG_TAG, "Background sampling failed", t)

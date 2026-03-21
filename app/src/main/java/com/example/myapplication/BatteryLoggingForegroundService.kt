@@ -28,10 +28,13 @@ class BatteryLoggingForegroundService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var loopJob: Job? = null
     private lateinit var dao: BatterySampleDao
+    private lateinit var repository: BatteryRepository
+    private var lastBatteryLevel: Float = -1f
 
     override fun onCreate() {
         super.onCreate()
         dao = BatteryDatabase.getInstance(applicationContext).batterySampleDao()
+        repository = BatteryRepository(dao)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
     }
@@ -40,7 +43,7 @@ class BatteryLoggingForegroundService : Service() {
         if (loopJob?.isActive != true) {
             loopJob = serviceScope.launch {
                 while (isActive) {
-                    logBatteryTick()
+                    logBatteryTickIfDropped()
                     delay(LOG_INTERVAL_MS)
                 }
             }
@@ -57,7 +60,7 @@ class BatteryLoggingForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private suspend fun logBatteryTick() {
+    private suspend fun logBatteryTickIfDropped() {
         val wakeLock = acquireTickWakeLock()
         try {
             val batteryIntent = registerReceiver(
@@ -71,21 +74,51 @@ class BatteryLoggingForegroundService : Service() {
                 .toFloat()
                 .coerceIn(0f, 100f)
 
+            // Detect charging state — skip insertion if charging
+            val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val plugged = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+            val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL ||
+                plugged != 0
+
+            if (isCharging) {
+                Log.d(SERVICE_LOG_TAG, "Skipped sample while charging")
+                return
+            }
+
+            // Event-driven: Only insert if battery has dropped (not flat or rising)
+            if (lastBatteryLevel < 0f) {
+                // First sample: initialize the baseline
+                lastBatteryLevel = batteryPercent
+                Log.d(SERVICE_LOG_TAG, "Initialized baseline battery level: $batteryPercent%")
+                return
+            }
+
+            if (batteryPercent >= lastBatteryLevel) {
+                // Battery is flat or rising — skip insertion
+                Log.d(SERVICE_LOG_TAG, "Battery flat/rising ($lastBatteryLevel% -> $batteryPercent%) — skipped insertion")
+                return
+            }
+
             val voltageMv = batteryIntent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1
             val now = System.currentTimeMillis()
 
-            dao.insertSample(
-                BatterySample(
-                    timestampEpochMillis = now,
-                    batteryLevel = batteryPercent,
-                    voltage = voltageMv,
-                    servicesActive = true,
-                    foreground = false,
-                    isCharging = false
-                )
+            val sample = BatterySample(
+                timestampEpochMillis = now,
+                batteryLevel = batteryPercent,
+                voltage = voltageMv,
+                servicesActive = true,
+                foreground = false,
+                isCharging = false
             )
+
+            val id = repository.insertSample(sample)
+            if (id > 0) {
+                lastBatteryLevel = batteryPercent
+                Log.d(SERVICE_LOG_TAG, "Logged background tick at $now (battery: $batteryPercent%, id: $id)")
+            }
+
             dao.deleteOlderThan(now - TimeUnit.DAYS.toMillis(7))
-            Log.d(SERVICE_LOG_TAG, "Logged background tick at $now")
         } catch (t: Throwable) {
             Log.e(SERVICE_LOG_TAG, "Battery logging tick failed", t)
         } finally {
