@@ -38,7 +38,8 @@
             android:name=".BatteryLoggingForegroundService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
 
         <receiver
             android:name=".BatteryBootReceiver"

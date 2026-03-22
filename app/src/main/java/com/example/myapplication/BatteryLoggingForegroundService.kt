@@ -3,22 +3,20 @@ package com.example.myapplication
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
@@ -26,81 +24,88 @@ private const val SERVICE_LOG_TAG = "BatteryFgService"
 
 class BatteryLoggingForegroundService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var loopJob: Job? = null
     private lateinit var dao: BatterySampleDao
     private lateinit var repository: BatteryRepository
-    private var lastBatteryLevel: Float = -1f
+    private var lastRecordedLevel: Int = LEVEL_UNINITIALIZED
+    private lateinit var prefs: android.content.SharedPreferences
+
+    private val batteryChangedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != Intent.ACTION_BATTERY_CHANGED) return
+
+            val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            if (level < 0 || scale <= 0) return
+
+            val normalizedLevel = ((level * 100f) / scale).toInt().coerceIn(0, 100)
+            val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+            val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+            val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL ||
+                plugged != 0
+
+            if (isCharging) {
+                persistLastRecordedLevel(normalizedLevel)
+                Log.d(SERVICE_LOG_TAG, "Charging event ignored (level=$normalizedLevel)")
+                return
+            }
+
+            if (lastRecordedLevel == LEVEL_UNINITIALIZED) {
+                persistLastRecordedLevel(normalizedLevel)
+                Log.d(SERVICE_LOG_TAG, "Initialized drop gate baseline at $normalizedLevel%")
+                return
+            }
+
+            // Strict gatekeeper: only 1% drops are persisted; flat/rising updates are ignored.
+            if (normalizedLevel >= lastRecordedLevel) {
+                Log.d(SERVICE_LOG_TAG, "Ignored non-drop update ($lastRecordedLevel% -> $normalizedLevel%)")
+                return
+            }
+
+            serviceScope.launch {
+                insertDischargeSample(intent, normalizedLevel)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         dao = BatteryDatabase.getInstance(applicationContext).batterySampleDao()
         repository = BatteryRepository(dao)
-        createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
-    }
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        lastRecordedLevel = prefs.getInt(KEY_LAST_RECORDED_LEVEL, LEVEL_UNINITIALIZED)
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (loopJob?.isActive != true) {
-            loopJob = serviceScope.launch {
-                while (isActive) {
-                    logBatteryTickIfDropped()
-                    delay(LOG_INTERVAL_MS)
+        // If no persisted baseline exists, seed from the most recent row in Room.
+        if (lastRecordedLevel == LEVEL_UNINITIALIZED) {
+            serviceScope.launch {
+                dao.getLatestSample()?.let { sample ->
+                    persistLastRecordedLevel(sample.batteryLevel.toInt())
                 }
             }
         }
+
+        createNotificationChannel()
+        startForeground(NOTIFICATION_ID, buildNotification())
+        registerBatteryReceiver()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Self-heal: request automatic restart if process is killed for memory pressure.
         return START_STICKY
     }
 
     override fun onDestroy() {
-        loopJob?.cancel()
+        unregisterReceiverSafely()
         serviceScope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private suspend fun logBatteryTickIfDropped() {
-        val wakeLock = acquireTickWakeLock()
+    private suspend fun insertDischargeSample(batteryIntent: Intent, currentLevel: Int) {
         try {
-            val batteryIntent = registerReceiver(
-                null,
-                IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-            )
-
-            val batteryManager = getSystemService(BATTERY_SERVICE) as BatteryManager
-            val batteryPercent = batteryManager
-                .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-                .toFloat()
-                .coerceIn(0f, 100f)
-
-            // Detect charging state — skip insertion if charging
-            val status = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
-            val plugged = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
-            val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                status == BatteryManager.BATTERY_STATUS_FULL ||
-                plugged != 0
-
-            if (isCharging) {
-                Log.d(SERVICE_LOG_TAG, "Skipped sample while charging")
-                return
-            }
-
-            // Event-driven: Only insert if battery has dropped (not flat or rising)
-            if (lastBatteryLevel < 0f) {
-                // First sample: initialize the baseline
-                lastBatteryLevel = batteryPercent
-                Log.d(SERVICE_LOG_TAG, "Initialized baseline battery level: $batteryPercent%")
-                return
-            }
-
-            if (batteryPercent >= lastBatteryLevel) {
-                // Battery is flat or rising — skip insertion
-                Log.d(SERVICE_LOG_TAG, "Battery flat/rising ($lastBatteryLevel% -> $batteryPercent%) — skipped insertion")
-                return
-            }
-
-            val voltageMv = batteryIntent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1
+            val batteryPercent = currentLevel.toFloat()
+            val voltageMv = batteryIntent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
             val now = System.currentTimeMillis()
 
             val sample = BatterySample(
@@ -114,26 +119,45 @@ class BatteryLoggingForegroundService : Service() {
 
             val id = repository.insertSample(sample)
             if (id > 0) {
-                lastBatteryLevel = batteryPercent
-                Log.d(SERVICE_LOG_TAG, "Logged background tick at $now (battery: $batteryPercent%, id: $id)")
+                persistLastRecordedLevel(currentLevel)
+                Log.d(SERVICE_LOG_TAG, "Logged battery drop sample at $now (level=$currentLevel%, id=$id)")
+            } else {
+                // Repository-level guard may skip if a concurrent write already inserted same level.
+                persistLastRecordedLevel(currentLevel)
+                Log.d(SERVICE_LOG_TAG, "Skipped duplicate drop sample at level=$currentLevel%")
             }
 
             dao.deleteOlderThan(now - TimeUnit.DAYS.toMillis(7))
         } catch (t: Throwable) {
-            Log.e(SERVICE_LOG_TAG, "Battery logging tick failed", t)
-        } finally {
-            if (wakeLock?.isHeld == true) {
-                wakeLock.release()
-            }
+            Log.e(SERVICE_LOG_TAG, "Battery logging insert failed", t)
         }
     }
 
-    private fun acquireTickWakeLock(): PowerManager.WakeLock? {
-        val pm = getSystemService(PowerManager::class.java) ?: return null
-        val wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:BatteryTick")
-        wakeLock.setReferenceCounted(false)
-        wakeLock.acquire(WAKELOCK_TIMEOUT_MS)
-        return wakeLock
+    private fun registerBatteryReceiver() {
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(batteryChangedReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            ContextCompat.registerReceiver(
+                this,
+                batteryChangedReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }
+    }
+
+    private fun unregisterReceiverSafely() {
+        try {
+            unregisterReceiver(batteryChangedReceiver)
+        } catch (_: IllegalArgumentException) {
+            // Receiver was already unregistered.
+        }
+    }
+
+    private fun persistLastRecordedLevel(level: Int) {
+        lastRecordedLevel = level
+        prefs.edit().putInt(KEY_LAST_RECORDED_LEVEL, level).apply()
     }
 
     private fun createNotificationChannel() {
@@ -166,9 +190,9 @@ class BatteryLoggingForegroundService : Service() {
         private const val CHANNEL_ID = "volt_watch_monitoring"
         private const val CHANNEL_NAME = "Volt Watch Monitoring"
         private const val NOTIFICATION_ID = 1001
-
-        private const val LOG_INTERVAL_MS = 60_000L
-        private const val WAKELOCK_TIMEOUT_MS = 20_000L
+        private const val PREFS_NAME = "battery_guard_monitoring"
+        private const val KEY_LAST_RECORDED_LEVEL = "last_recorded_level"
+        private const val LEVEL_UNINITIALIZED = -1
 
         fun start(context: Context) {
             val intent = Intent(context, BatteryLoggingForegroundService::class.java)

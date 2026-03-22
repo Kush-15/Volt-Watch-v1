@@ -150,9 +150,8 @@ class MainActivity : AppCompatActivity() {
                         batteryStatusText.text = batteryStatusLabel(pct)
                     }
 
+                    // Foreground service owns database writes to avoid duplicate inserts.
                     withContext(Dispatchers.IO) {
-                        val id = repository.insertSample(sample)
-                        Log.d(LOG_TAG, "Sample inserted id=$id at ${sample.timestampEpochMillis}")
                         val cutoff = System.currentTimeMillis() - sevenDaysMillis
                         val deleted = repository.pruneOlderThan(cutoff)
                         if (deleted > 0) Log.d(LOG_TAG, "Pruned $deleted old samples")
