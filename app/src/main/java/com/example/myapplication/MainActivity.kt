@@ -1,6 +1,8 @@
 package com.example.myapplication
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -9,7 +11,10 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -65,6 +70,23 @@ class MainActivity : AppCompatActivity() {
     private val samplingIntervalMs = 30_000L
     private val sevenDaysMillis = TimeUnit.DAYS.toMillis(7)
 
+    // ── Permission Launchers ──
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            Log.d(LOG_TAG, "✅ POST_NOTIFICATIONS permission granted - Starting Foreground Service")
+            startBatteryService()
+        } else {
+            Log.w(LOG_TAG, "❌ POST_NOTIFICATIONS permission denied")
+            Toast.makeText(
+                this,
+                "Permission denied: Background battery tracking requires notification permission",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -84,6 +106,9 @@ class MainActivity : AppCompatActivity() {
 
         sampler = BatterySampler(this, BatteryLoggingForegroundService::class.java.name)
         promptIgnoreBatteryOptimizationsIfNeeded()
+        
+        // ── Request POST_NOTIFICATIONS permission (Android 13+) ──
+        requestNotificationPermissionIfNeeded()
     }
 
     override fun onResume() {
@@ -304,5 +329,46 @@ class MainActivity : AppCompatActivity() {
             )
             prefs.edit().putBoolean(KEY_HISTORY_CLEANUP_DONE, true).apply()
         }
+    }
+
+    /**
+     * Request POST_NOTIFICATIONS permission on Android 13+ (API 33+).
+     * 
+     * The Foreground Service requires a notification to stay alive. Without this permission,
+     * startForeground() will crash silently, preventing the BatteryLoggingForegroundService
+     * from capturing battery data.
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        // Only request on Android 13 (Tiramisu) and above
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            Log.d(LOG_TAG, "Device running Android < 13: Notification permission auto-granted")
+            startBatteryService()
+            return
+        }
+
+        // Check if permission is already granted
+        val isGranted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (isGranted) {
+            Log.d(LOG_TAG, "✅ POST_NOTIFICATIONS permission already granted")
+            startBatteryService()
+        } else {
+            Log.d(LOG_TAG, "⏳ Requesting POST_NOTIFICATIONS permission from user...")
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    /**
+     * Start the BatteryLoggingForegroundService.
+     * 
+     * This is called after the POST_NOTIFICATIONS permission is confirmed to be granted.
+     * The service will display a persistent notification and start collecting battery telemetry.
+     */
+    private fun startBatteryService() {
+        Log.d(LOG_TAG, "🚀 Starting BatteryLoggingForegroundService...")
+        BatteryLoggingForegroundService.start(this)
     }
 }

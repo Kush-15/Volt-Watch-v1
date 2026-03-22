@@ -40,9 +40,7 @@ class BatteryLoggingForegroundService : Service() {
             val normalizedLevel = ((level * 100f) / scale).toInt().coerceIn(0, 100)
             val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
             val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
-            val isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                status == BatteryManager.BATTERY_STATUS_FULL ||
-                plugged != 0
+            val isCharging = plugged != 0 || status == BatteryManager.BATTERY_STATUS_CHARGING
 
             if (isCharging) {
                 persistLastRecordedLevel(normalizedLevel)
@@ -56,9 +54,20 @@ class BatteryLoggingForegroundService : Service() {
                 return
             }
 
-            // Strict gatekeeper: only 1% drops are persisted; flat/rising updates are ignored.
-            if (normalizedLevel >= lastRecordedLevel) {
-                Log.d(SERVICE_LOG_TAG, "Ignored non-drop update ($lastRecordedLevel% -> $normalizedLevel%)")
+            // If level jumped up while we were not tracking (restart/kill), re-baseline.
+            if (normalizedLevel > lastRecordedLevel) {
+                val previousLevel = lastRecordedLevel
+                persistLastRecordedLevel(normalizedLevel)
+                Log.d(
+                    SERVICE_LOG_TAG,
+                    "Re-baselined after level increase ($previousLevel% -> $normalizedLevel%)"
+                )
+                return
+            }
+
+            // Strict gatekeeper: only drops are persisted; flat updates are ignored.
+            if (normalizedLevel == lastRecordedLevel) {
+                Log.d(SERVICE_LOG_TAG, "Ignored flat update at $normalizedLevel%")
                 return
             }
 
@@ -122,9 +131,15 @@ class BatteryLoggingForegroundService : Service() {
                 persistLastRecordedLevel(currentLevel)
                 Log.d(SERVICE_LOG_TAG, "Logged battery drop sample at $now (level=$currentLevel%, id=$id)")
             } else {
-                // Repository-level guard may skip if a concurrent write already inserted same level.
-                persistLastRecordedLevel(currentLevel)
-                Log.d(SERVICE_LOG_TAG, "Skipped duplicate drop sample at level=$currentLevel%")
+                // Keep service baseline aligned with DB truth when repository rejects the row.
+                val latestDbLevel = dao.getLatestSample()?.batteryLevel?.toInt()
+                if (latestDbLevel != null) {
+                    persistLastRecordedLevel(latestDbLevel)
+                }
+                Log.d(
+                    SERVICE_LOG_TAG,
+                    "Skipped drop insert at level=$currentLevel% (dbLatest=${latestDbLevel ?: "none"})"
+                )
             }
 
             dao.deleteOlderThan(now - TimeUnit.DAYS.toMillis(7))

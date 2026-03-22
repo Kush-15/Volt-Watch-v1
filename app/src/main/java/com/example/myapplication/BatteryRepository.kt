@@ -20,10 +20,18 @@ class BatteryRepository(
 
     suspend fun insertSample(sample: BatterySample): Long = withContext(ioDispatcher) {
         val latest = dao.getLatestSample()
-        if (latest == null || sample.batteryLevel < latest.batteryLevel) {
-            dao.insertSample(sample)
-        } else {
-            INSERT_SKIPPED_ID
+        when {
+            latest == null -> dao.insertSample(sample)
+
+            sample.batteryLevel < latest.batteryLevel -> dao.insertSample(sample)
+
+            // New discharge cycle after charging/restart: old low-level rows would block inserts forever.
+            sample.batteryLevel >= latest.batteryLevel + NEW_CYCLE_LEVEL_DELTA_PERCENT -> {
+                dao.clearAllSamples()
+                dao.insertSample(sample)
+            }
+
+            else -> INSERT_SKIPPED_ID
         }
     }
 
@@ -81,6 +89,7 @@ class BatteryRepository(
     companion object {
         const val INSERT_SKIPPED_ID = -1L
         private const val ML_UPWARD_TOLERANCE_PERCENT = 0.15f
+        private const val NEW_CYCLE_LEVEL_DELTA_PERCENT = 2.0f
     }
 }
 
