@@ -41,6 +41,8 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "battery_prediction_prefs"
         private const val KEY_OPT_PROMPTED = "battery_opt_prompted"
         private const val KEY_HISTORY_CLEANUP_DONE = "history_cleanup_done_v1"
+        private const val REQUIRED_CHARGING_TICKS_FOR_RESET = 2
+        private const val SERVICE_RECOVERY_COOLDOWN_MS = 60_000L
     }
 
     private lateinit var sampler: BatterySampler
@@ -62,6 +64,8 @@ class MainActivity : AppCompatActivity() {
     private var predictionJob: Job? = null
     private var promptedUsageAccess = false
     private var wasChargingInPreviousTick = false
+    private var consecutiveChargingTicks = 0
+    private var lastServiceRecoveryAttemptMs = 0L
     private var lastPredictionRunTimeMs: Long = 0L
     private var lastPredictionBatteryLevel: Float = 100f
     private var cachedSmoothedHours: Double? = null
@@ -130,7 +134,10 @@ class MainActivity : AppCompatActivity() {
                 val sample = sampler.sample()   // also sets sampler.isCharging
 
                 if (sampler.isCharging) {
-                    wasChargingInPreviousTick = true
+                    consecutiveChargingTicks += 1
+                    if (consecutiveChargingTicks >= REQUIRED_CHARGING_TICKS_FOR_RESET) {
+                        wasChargingInPreviousTick = true
+                    }
                     predictionJob?.cancel()
                     withContext(Dispatchers.Main) {
                         batteryStatusText.text = "⚡ Charging..."
@@ -141,6 +148,8 @@ class MainActivity : AppCompatActivity() {
                     delay(samplingIntervalMs)
                     continue
                 }
+
+                consecutiveChargingTicks = 0
 
                 // ── Charging → discharging transition ──
                 if (wasChargingInPreviousTick) {
@@ -167,6 +176,31 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (sample != null) {
+                    if (!sample.servicesActive) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastServiceRecoveryAttemptMs >= SERVICE_RECOVERY_COOLDOWN_MS) {
+                            lastServiceRecoveryAttemptMs = now
+                            Log.w(LOG_TAG, "Foreground battery service not running; requesting restart")
+                            requestNotificationPermissionIfNeeded()
+                        }
+
+                        // Fallback writer: keeps DB alive even if OEM kills the service.
+                        withContext(Dispatchers.IO) {
+                            val fallbackSample = sample.copy(
+                                servicesActive = true,
+                                foreground = false,
+                                isCharging = false
+                            )
+                            val id = repository.insertSample(fallbackSample)
+                            if (id > 0) {
+                                Log.w(
+                                    LOG_TAG,
+                                    "Inserted fallback sample from UI loop (id=$id, level=${sample.batteryLevel.toInt()}%)"
+                                )
+                            }
+                        }
+                    }
+
                     withContext(Dispatchers.Main) {
                         val pct = sample.batteryLevel
                         batteryIcon.setLevel(pct)
@@ -213,14 +247,17 @@ class MainActivity : AppCompatActivity() {
 
                 val graphPoints = BatteryGraphSanitizer.buildDisplayPoints(olsSamples)
 
-                if (olsSamples.size < minSamplesToFit) {
+                // ── NEW: Changed threshold from minSamplesToFit (6) to 10 for better stability ──
+                // With 10+ samples, the OLS fit is more numerically stable and less prone to noise
+                if (olsSamples.size < 10) {
+                    Log.d(LOG_TAG, "❌ Not enough samples: ${olsSamples.size}/10. Showing 'Learning...'")
                     withContext(Dispatchers.Main) {
-                        sampleCountText.text   = "${olsSamples.size}/$minSamplesToFit samples"
+                        sampleCountText.text   = "${olsSamples.size}/10 samples"
                         timeRemainingText.text = BatteryPredictionUiFormatter.remainingText(
                             sampleCount       = olsSamples.size,
                             rawPredictedHours = null
                         )
-                        todText.text = "Need ${minSamplesToFit - olsSamples.size} more reading(s)"
+                        todText.text = "Need ${10 - olsSamples.size} more reading(s)"
                         batteryGraph.setData(graphPoints, null)
                     }
                     return@launch
@@ -236,11 +273,22 @@ class MainActivity : AppCompatActivity() {
                     lastBatteryLevel = lastPredictionBatteryLevel
                 )
 
+                Log.d(LOG_TAG, "📊 Prediction check: samples=${olsSamples.size}, shouldRun=$shouldRunMath, cached=${cachedSmoothedHours}")
+
                 if (shouldRunMath || cachedSmoothedHours == null) {
                     val result = predictionEngine.predictRemainingHours(olsSamples)
                     lastPredictionRunTimeMs = nowEpochMillis
                     lastPredictionBatteryLevel = currentBatteryLevel
+                    
+                    Log.d(LOG_TAG, "🔬 OLS Result: raw=${result.rawHours}h, smoothed=${result.smoothedHours}h, slope=${result.slope}")
+                    
                     cachedSmoothedHours = if (result.smoothedHours > 0.0) result.smoothedHours else null
+                    
+                    if (cachedSmoothedHours == null) {
+                        Log.w(LOG_TAG, "⚠️ OLS returned invalid result: rawHours=${result.rawHours}, smoothedHours=${result.smoothedHours}")
+                    }
+                } else {
+                    Log.d(LOG_TAG, "✅ Using cached prediction: ${cachedSmoothedHours}h")
                 }
 
                 val predictedHoursForUi = cachedSmoothedHours
@@ -250,6 +298,8 @@ class MainActivity : AppCompatActivity() {
                             it <= BatteryPredictionUiFormatter.UNREALISTIC_HOURS_THRESHOLD
                     }
                     ?.let { nowEpochMillis + (it * 3_600_000.0).toLong() }
+
+                Log.d(LOG_TAG, "📱 UI Update: predictedHours=$predictedHoursForUi, tDeath=$tDeathEpochMillis")
 
                 withContext(Dispatchers.Main) {
                     sampleCountText.text = "${olsSamples.size} samples"

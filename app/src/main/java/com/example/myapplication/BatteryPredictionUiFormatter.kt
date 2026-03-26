@@ -20,7 +20,7 @@ object BatteryPredictionUiFormatter {
         }
 
         if (hours > UNREALISTIC_HOURS_THRESHOLD) {
-            return "Calculating..."
+            return "24h+ remaining"
         }
 
         val totalMinutes = floor(hours * 60.0).toInt().coerceAtLeast(0)

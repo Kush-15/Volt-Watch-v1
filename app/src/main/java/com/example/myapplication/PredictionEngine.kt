@@ -17,10 +17,10 @@ import kotlin.math.abs
 class PredictionEngine(
     private val computeDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
-    private val predictionSmaWindow = ArrayDeque<Double>()
+    private var previousEtaHours: Double? = null
 
     fun reset() {
-        predictionSmaWindow.clear()
+        previousEtaHours = null
     }
 
     /**
@@ -42,7 +42,7 @@ class PredictionEngine(
      * - x: cumulative elapsed minutes between accepted 1% drop anchors
      * - y: battery percentage
      *
-     * Returns the smoothed prediction in hours by averaging the last 5 successful runs.
+     * Returns the smoothed prediction in hours by applying an asymmetric EMA shock absorber.
      * Returns INVALID_PREDICTION_HOURS when math is not reliable.
      */
     suspend fun predictRemainingHours(samples: List<BatterySample>): PredictionResult =
@@ -109,12 +109,20 @@ class PredictionEngine(
                 )
             }
 
-            if (predictionSmaWindow.size == SMA_WINDOW_SIZE) {
-                predictionSmaWindow.removeFirst()
-            }
-            predictionSmaWindow.addLast(rawHours)
+            // Bound raw ETA jumps against the previous UI ETA to avoid violent one-tick swings.
+            val boundedRawHours = boundRawEta(rawHours, previousEtaHours)
 
-            val smoothedHours = predictionSmaWindow.average()
+            val alpha = when {
+                previousEtaHours == null -> 1.0
+                boundedRawHours > previousEtaHours!! -> EMA_ALPHA_RECOVERY
+                else -> EMA_ALPHA_DECAY
+            }
+
+            val smoothedHours = previousEtaHours
+                ?.let { (alpha * boundedRawHours) + ((1.0 - alpha) * it) }
+                ?: boundedRawHours
+
+            previousEtaHours = smoothedHours
             PredictionResult(
                 slope = slope,
                 intercept = intercept,
@@ -126,10 +134,22 @@ class PredictionEngine(
     companion object {
         const val MIN_RETRAIN_INTERVAL_MS = 300_000L
         const val MIN_RETRAIN_DROP_PERCENT = 2.0f
-        const val OLS_WINDOW_SIZE = 50
-        const val SMA_WINDOW_SIZE = 5
+        const val OLS_WINDOW_SIZE = 20
         const val INVALID_PREDICTION_HOURS = -1.0
         private const val MIN_LEVEL_DROP_STEP_PERCENT = 1.0f
+        private const val EMA_ALPHA_DECAY = 0.3
+        private const val EMA_ALPHA_RECOVERY = 0.7
+        private const val MIN_ETA_STEP_FACTOR = 0.6
+        private const val MAX_ETA_STEP_FACTOR = 1.8
+        private const val MAX_ABSOLUTE_ETA_HOURS = 48.0
+    }
+
+    private fun boundRawEta(rawHours: Double, previousHours: Double?): Double {
+        val absoluteBounded = rawHours.coerceIn(0.01, MAX_ABSOLUTE_ETA_HOURS)
+        val previous = previousHours ?: return absoluteBounded
+        val minAllowed = previous * MIN_ETA_STEP_FACTOR
+        val maxAllowed = previous * MAX_ETA_STEP_FACTOR
+        return absoluteBounded.coerceIn(minAllowed, maxAllowed)
     }
 
     private fun buildOnePercentDropAnchors(samples: List<BatterySample>): List<BatterySample> {

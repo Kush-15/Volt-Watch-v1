@@ -28,9 +28,9 @@ class BatteryPredictionUiFormatterTest {
     }
 
     @Test
-    fun idleOrUnrealistic_showsCalculating_whenHoursAbove24() {
+    fun idleOrUnrealistic_shows24hPlus_whenHoursAbove24() {
         val text = BatteryPredictionUiFormatter.remainingText(sampleCount = 20, rawPredictedHours = 24.01)
-        assertEquals("Calculating...", text)
+        assertEquals("24h+ remaining", text)
     }
 
     @Test

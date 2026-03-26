@@ -109,9 +109,14 @@ interface BatterySampleDao {
     @Query("SELECT COUNT(*) FROM batterysample")
     suspend fun getSampleCount(): Int
 
+    @Query("SELECT COUNT(*) FROM batterysample WHERE is_charging = 0")
+    suspend fun getNonChargingSampleCount(): Int
 
     @Query("DELETE FROM batterysample")
     suspend fun clearAllSamples()
+
+    @Query("DELETE FROM batterysample")
+    suspend fun clearAllData()
 }
 
 

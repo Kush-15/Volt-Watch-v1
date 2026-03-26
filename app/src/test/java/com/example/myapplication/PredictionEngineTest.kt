@@ -49,7 +49,7 @@ class PredictionEngineTest {
     }
 
     @Test
-    fun predict_smoothsOutput_withFivePointSma() = runBlocking {
+    fun predict_smoothsOutput_withAsymmetricEma() = runBlocking {
         val engine = PredictionEngine()
 
         val r1 = engine.predictRemainingHours(buildLinearSamples(50, 80f, -0.30f)).smoothedHours
@@ -64,8 +64,8 @@ class PredictionEngineTest {
         assertTrue(r4 > 0.0)
         assertTrue(r5 > 0.0)
 
-        // The smoothed value should stay in a realistic middle range after 5 updates.
-        assertTrue(r5 in 4.0..7.0)
+        // EMA should damp sudden drops but still track slower-drain recovery.
+        assertTrue(r5 in 4.0..10.0)
     }
 
     private fun buildLinearSamples(
