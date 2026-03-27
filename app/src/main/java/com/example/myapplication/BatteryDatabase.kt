@@ -67,35 +67,22 @@ interface BatterySampleDao {
     suspend fun getSamplesSince(sinceEpochMillis: Long): List<BatterySample>
 
     @Query(
-        "SELECT * FROM batterysample WHERE is_charging = 0 ORDER BY timestampEpochMillis DESC LIMIT 50"
+        "SELECT * FROM batterysample ORDER BY timestampEpochMillis DESC LIMIT :windowSize"
     )
-    suspend fun getLast50NonChargingSamples(): List<BatterySample>
+    suspend fun getPredictionWindow(windowSize: Int): List<BatterySample>
 
-    @Query("DELETE FROM batterysample WHERE is_charging = 1")
-    suspend fun deleteChargingRows(): Int
+    @Query("SELECT MAX(timestampEpochMillis) FROM batterysample WHERE is_charging = 1")
+    suspend fun getLatestChargingTimestamp(): Long?
 
     @Query(
-        """
-        DELETE FROM batterysample
-        WHERE id IN (
-            SELECT cur.id
-            FROM batterysample AS cur
-            JOIN batterysample AS prev
-              ON prev.timestampEpochMillis = (
-                    SELECT MAX(p.timestampEpochMillis)
-                    FROM batterysample AS p
-                    WHERE p.timestampEpochMillis < cur.timestampEpochMillis
-                )
-            WHERE cur.is_charging = 0
-              AND prev.is_charging = 0
-              AND (
-                    cur.batteryLevel > prev.batteryLevel
-                 OR cur.voltage > prev.voltage
-              )
-        )
-        """
+        "SELECT * FROM batterysample " +
+            "WHERE is_charging = 0 AND timestampEpochMillis > :sinceEpochMillis " +
+            "ORDER BY timestampEpochMillis DESC LIMIT :windowSize"
     )
-    suspend fun deleteOrphanUpwardSpikes(): Int
+    suspend fun getPredictionWindowSince(
+        sinceEpochMillis: Long,
+        windowSize: Int
+    ): List<BatterySample>
 
 
     @Query("DELETE FROM batterysample WHERE timestampEpochMillis < :cutoffEpochMillis")

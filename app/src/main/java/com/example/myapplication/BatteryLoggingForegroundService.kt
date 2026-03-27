@@ -40,11 +40,14 @@ class BatteryLoggingForegroundService : Service() {
             val normalizedLevel = ((level * 100f) / scale).toInt().coerceIn(0, 100)
             val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
             val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
-            val isCharging = plugged != 0 || status == BatteryManager.BATTERY_STATUS_CHARGING
+            val isCharging = plugged != 0 ||
+                status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
 
             if (isCharging) {
-                persistLastRecordedLevel(normalizedLevel)
-                Log.d(SERVICE_LOG_TAG, "Charging event ignored (level=$normalizedLevel)")
+                serviceScope.launch {
+                    insertChargingMarker(normalizedLevel)
+                }
                 return
             }
 
@@ -57,6 +60,9 @@ class BatteryLoggingForegroundService : Service() {
             // If level jumped up while we were not tracking (restart/kill), re-baseline.
             if (normalizedLevel > lastRecordedLevel) {
                 val previousLevel = lastRecordedLevel
+                serviceScope.launch {
+                    maybeResetStaleDatabase(normalizedLevel)
+                }
                 persistLastRecordedLevel(normalizedLevel)
                 Log.d(
                     SERVICE_LOG_TAG,
@@ -77,6 +83,24 @@ class BatteryLoggingForegroundService : Service() {
         }
     }
 
+    private val powerStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_POWER_CONNECTED -> {
+                    serviceScope.launch {
+                        insertPowerTransitionSample(forceCharging = true)
+                    }
+                }
+
+                Intent.ACTION_POWER_DISCONNECTED -> {
+                    serviceScope.launch {
+                        insertPowerTransitionSample(forceCharging = false)
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         dao = BatteryDatabase.getInstance(applicationContext).batterySampleDao()
@@ -93,6 +117,10 @@ class BatteryLoggingForegroundService : Service() {
             }
         }
 
+        serviceScope.launch {
+            recoverChargingStateOnRestart()
+        }
+
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
         registerBatteryReceiver()
@@ -105,6 +133,7 @@ class BatteryLoggingForegroundService : Service() {
 
     override fun onDestroy() {
         unregisterReceiverSafely()
+        unregisterPowerReceiverSafely()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -148,6 +177,110 @@ class BatteryLoggingForegroundService : Service() {
         }
     }
 
+    private suspend fun insertPowerTransitionSample(forceCharging: Boolean) {
+        try {
+            val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = sticky?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = sticky?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            if (level < 0 || scale <= 0) return
+
+            val normalizedLevel = ((level * 100f) / scale).toInt().coerceIn(0, 100)
+            val voltageMv = sticky?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1
+            val now = System.currentTimeMillis()
+
+            val transitionSample = BatterySample(
+                timestampEpochMillis = now,
+                batteryLevel = normalizedLevel.toFloat(),
+                voltage = voltageMv,
+                servicesActive = true,
+                foreground = false,
+                isCharging = forceCharging
+            )
+
+            repository.insertStateSample(transitionSample)
+            persistLastRecordedLevel(normalizedLevel)
+            Log.d(
+                SERVICE_LOG_TAG,
+                "Inserted power transition sample (charging=$forceCharging, level=$normalizedLevel%)"
+            )
+        } catch (t: Throwable) {
+            Log.e(SERVICE_LOG_TAG, "Failed to insert power transition sample", t)
+        }
+    }
+
+    private suspend fun insertChargingMarker(level: Int) {
+        try {
+            val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
+            val voltageMv = sticky.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
+            val now = System.currentTimeMillis()
+
+            val chargingMarker = BatterySample(
+                timestampEpochMillis = now,
+                batteryLevel = level.toFloat(),
+                voltage = voltageMv,
+                servicesActive = true,
+                foreground = false,
+                isCharging = true
+            )
+
+            repository.insertStateSample(chargingMarker)
+            persistLastRecordedLevel(level)
+            Log.d(SERVICE_LOG_TAG, "Inserted charging marker (level=$level%)")
+        } catch (t: Throwable) {
+            Log.e(SERVICE_LOG_TAG, "Failed to insert charging marker", t)
+        }
+    }
+
+    private suspend fun recoverChargingStateOnRestart() {
+        try {
+            val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return
+            val level = sticky.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = sticky.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+            if (level < 0 || scale <= 0) return
+
+            val normalizedLevel = ((level * 100f) / scale).toInt().coerceIn(0, 100)
+            val status = sticky.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+            val plugged = sticky.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+            val isChargingNow = plugged != 0 ||
+                status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                status == BatteryManager.BATTERY_STATUS_FULL
+
+            val latest = dao.getLatestSample()
+            val shouldInsertRecoveryMarker = latest == null || latest.isCharging != isChargingNow
+            if (shouldInsertRecoveryMarker) {
+                val voltageMv = sticky.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
+                val marker = BatterySample(
+                    timestampEpochMillis = System.currentTimeMillis(),
+                    batteryLevel = normalizedLevel.toFloat(),
+                    voltage = voltageMv,
+                    servicesActive = true,
+                    foreground = false,
+                    isCharging = isChargingNow
+                )
+                repository.insertStateSample(marker)
+                Log.d(
+                    SERVICE_LOG_TAG,
+                    "Recovered charging state on restart (charging=$isChargingNow, level=$normalizedLevel%)"
+                )
+            }
+
+            persistLastRecordedLevel(normalizedLevel)
+        } catch (t: Throwable) {
+            Log.e(SERVICE_LOG_TAG, "Failed to recover charging state on restart", t)
+        }
+    }
+
+    private suspend fun maybeResetStaleDatabase(currentLevel: Int) {
+        val latest = dao.getLatestSample() ?: return
+        if (!latest.isCharging && (currentLevel - latest.batteryLevel) > STALE_LEVEL_JUMP_THRESHOLD_PERCENT) {
+            dao.clearAllSamples()
+            Log.w(
+                SERVICE_LOG_TAG,
+                "Cleared stale DB after level jump (${latest.batteryLevel.toInt()}% -> $currentLevel%)"
+            )
+        }
+    }
+
     private fun registerBatteryReceiver() {
         val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -160,11 +293,34 @@ class BatteryLoggingForegroundService : Service() {
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
         }
+
+        val powerFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(powerStateReceiver, powerFilter, RECEIVER_NOT_EXPORTED)
+        } else {
+            ContextCompat.registerReceiver(
+                this,
+                powerStateReceiver,
+                powerFilter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }
     }
 
     private fun unregisterReceiverSafely() {
         try {
             unregisterReceiver(batteryChangedReceiver)
+        } catch (_: IllegalArgumentException) {
+            // Receiver was already unregistered.
+        }
+    }
+
+    private fun unregisterPowerReceiverSafely() {
+        try {
+            unregisterReceiver(powerStateReceiver)
         } catch (_: IllegalArgumentException) {
             // Receiver was already unregistered.
         }
@@ -208,6 +364,7 @@ class BatteryLoggingForegroundService : Service() {
         private const val PREFS_NAME = "battery_guard_monitoring"
         private const val KEY_LAST_RECORDED_LEVEL = "last_recorded_level"
         private const val LEVEL_UNINITIALIZED = -1
+        private const val STALE_LEVEL_JUMP_THRESHOLD_PERCENT = 5.0f
 
         fun start(context: Context) {
             val intent = Intent(context, BatteryLoggingForegroundService::class.java)

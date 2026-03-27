@@ -1,6 +1,7 @@
 package com.example.myapplication
 
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
@@ -46,7 +47,12 @@ class PredictionEngine(
      * Returns INVALID_PREDICTION_HOURS when math is not reliable.
      */
     suspend fun predictRemainingHours(samples: List<BatterySample>): PredictionResult =
-        withContext(computeDispatcher) {
+        try {
+            withContext(computeDispatcher) {
+                if (samples.size < MIN_SAMPLES_FOR_PREDICTION) {
+                    return@withContext PredictionResult.invalid()
+                }
+
             val window = samples.takeLast(OLS_WINDOW_SIZE)
             val anchors = buildOnePercentDropAnchors(window)
 
@@ -122,19 +128,25 @@ class PredictionEngine(
                 ?.let { (alpha * boundedRawHours) + ((1.0 - alpha) * it) }
                 ?: boundedRawHours
 
-            previousEtaHours = smoothedHours
-            PredictionResult(
-                slope = slope,
-                intercept = intercept,
-                rawHours = rawHours,
-                smoothedHours = smoothedHours
-            )
+                previousEtaHours = smoothedHours
+                PredictionResult(
+                    slope = slope,
+                    intercept = intercept,
+                    rawHours = rawHours,
+                    smoothedHours = smoothedHours
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            PredictionResult.invalid()
         }
 
     companion object {
         const val MIN_RETRAIN_INTERVAL_MS = 300_000L
         const val MIN_RETRAIN_DROP_PERCENT = 2.0f
         const val OLS_WINDOW_SIZE = 20
+        const val MIN_SAMPLES_FOR_PREDICTION = 5
         const val INVALID_PREDICTION_HOURS = -1.0
         private const val MIN_LEVEL_DROP_STEP_PERCENT = 1.0f
         private const val EMA_ALPHA_DECAY = 0.3

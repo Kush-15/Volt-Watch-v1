@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "battery_prediction_prefs"
         private const val KEY_OPT_PROMPTED = "battery_opt_prompted"
         private const val KEY_HISTORY_CLEANUP_DONE = "history_cleanup_done_v1"
+        private const val KEY_DB_NUKE_DONE = "db_nuke_fresh_session_v1"
         private const val REQUIRED_CHARGING_TICKS_FOR_RESET = 2
         private const val SERVICE_RECOVERY_COOLDOWN_MS = 60_000L
     }
@@ -72,7 +73,7 @@ class MainActivity : AppCompatActivity() {
 
     private val minSamplesToFit = BatteryPredictionUiFormatter.COLD_START_MIN_SAMPLES
     private val samplingIntervalMs = 30_000L
-    private val sevenDaysMillis = TimeUnit.DAYS.toMillis(7)
+    private val thirtyDaysMillis = TimeUnit.DAYS.toMillis(30)
 
     // ── Permission Launchers ──
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -106,6 +107,7 @@ class MainActivity : AppCompatActivity() {
         database = BatteryDatabase.getInstance(applicationContext)
         dao = database.batterySampleDao()
         repository = BatteryRepository(dao)
+        runOneTimeDbNukeIfNeeded()
         runOneTimeHistoricalCleanupIfNeeded()
 
         sampler = BatterySampler(this, BatteryLoggingForegroundService::class.java.name)
@@ -157,15 +159,12 @@ class MainActivity : AppCompatActivity() {
                     predictionEngine.reset()
                     cachedSmoothedHours = null
                     lastPredictionRunTimeMs = 0L
-                    withContext(Dispatchers.IO) {
-                        repository.clearAllSamples()
-                    }
                     withContext(Dispatchers.Main) {
                         sampleCountText.text   = "0/$minSamplesToFit samples"
                         timeRemainingText.text = "Learning your habits..."
                         todText.text           = ""
                     }
-                    Log.d(LOG_TAG, "Device unplugged - cleared old samples and reset prediction state")
+                    Log.d(LOG_TAG, "Device unplugged - reset prediction state")
                 }
 
                 if (!sampler.hasUsageAccess()) {
@@ -211,12 +210,12 @@ class MainActivity : AppCompatActivity() {
 
                     // Foreground service owns database writes to avoid duplicate inserts.
                     withContext(Dispatchers.IO) {
-                        val cutoff = System.currentTimeMillis() - sevenDaysMillis
+                        val cutoff = System.currentTimeMillis() - thirtyDaysMillis
                         val deleted = repository.pruneOlderThan(cutoff)
                         if (deleted > 0) Log.d(LOG_TAG, "Pruned $deleted old samples")
                     }
 
-                    updatePrediction()
+                    updatePrediction(sample.batteryLevel)
                 } else {
                     withContext(Dispatchers.Main) {
                         batteryStatusText.text = "Calculating..."
@@ -237,12 +236,12 @@ class MainActivity : AppCompatActivity() {
         predictionJob = null
     }
 
-    private fun updatePrediction() {
+    private fun updatePrediction(currentSystemBatteryLevel: Float) {
         predictionJob?.cancel()
         predictionJob = lifecycleScope.launch {
             try {
                 val olsSamples = withContext(Dispatchers.IO) {
-                    repository.getRecentDischargingWindow()
+                    repository.getRecentDischargingWindow(currentSystemBatteryLevel)
                 }
 
                 val graphPoints = BatteryGraphSanitizer.buildDisplayPoints(olsSamples)
@@ -378,6 +377,21 @@ class MainActivity : AppCompatActivity() {
                 "Historical cleanup completed: removedCharging=${result.deletedChargingRows}, removedSpikes=${result.deletedOrphanSpikes}"
             )
             prefs.edit().putBoolean(KEY_HISTORY_CLEANUP_DONE, true).apply()
+        }
+    }
+
+    /**
+     * One-time wipe of all old contaminated rows before fresh session starts.
+     * After this, charging/discharging will be captured with clean session boundary.
+     */
+    private fun runOneTimeDbNukeIfNeeded() {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_DB_NUKE_DONE, false)) return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            repository.clearAllSamples()
+            Log.i(LOG_TAG, "🔥 Cleared all battery samples for fresh session start")
+            prefs.edit().putBoolean(KEY_DB_NUKE_DONE, true).apply()
         }
     }
 

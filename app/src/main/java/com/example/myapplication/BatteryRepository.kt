@@ -25,12 +25,6 @@ class BatteryRepository(
 
             sample.batteryLevel < latest.batteryLevel -> dao.insertSample(sample)
 
-            // New discharge cycle after charging/restart: old low-level rows would block inserts forever.
-            sample.batteryLevel >= latest.batteryLevel + NEW_CYCLE_LEVEL_DELTA_PERCENT -> {
-                dao.clearAllSamples()
-                dao.insertSample(sample)
-            }
-
             else -> INSERT_SKIPPED_ID
         }
     }
@@ -44,22 +38,67 @@ class BatteryRepository(
     }
 
     /**
-     * Fetches the latest 50 discharging points from Room and returns them in chronological order.
+     * Forces a state-marker write (power connected/disconnected) even when level did not drop.
      */
-    suspend fun getRecentDischargingWindow(): List<BatterySample> = withContext(ioDispatcher) {
-        val chronological = dao.getLast50NonChargingSamples().asReversed()
-        keepMostRecentContinuousDischargeBlock(chronological)
+    suspend fun insertStateSample(sample: BatterySample): Long = withContext(ioDispatcher) {
+        dao.insertSample(sample)
     }
 
     /**
-     * One-time historical cleanup for existing dirty logs.
+     * Fetches current-session discharging points only (after the most recent charging pivot)
+     * and returns them in chronological order.
+     */
+    suspend fun getRecentDischargingWindow(currentSystemBatteryLevel: Float): List<BatterySample> = withContext(ioDispatcher) {
+        val latest = dao.getLatestSample()
+
+        // State guard: DB is stale when real battery jumped up while latest row still says discharging.
+        if (
+            latest != null &&
+            !latest.isCharging &&
+            (currentSystemBatteryLevel - latest.batteryLevel) > STALE_LEVEL_JUMP_THRESHOLD_PERCENT
+        ) {
+            dao.clearAllSamples()
+            return@withContext emptyList()
+        }
+
+        val lastChargingTs = dao.getLatestChargingTimestamp()
+        val sessionWindowDesc = if (lastChargingTs == null) {
+            // Fallback for first-run/no-pivot state: only trust recent rows when DB and system levels match.
+            val canUseFallbackWindow =
+                latest != null &&
+                    !latest.isCharging &&
+                    kotlin.math.abs(currentSystemBatteryLevel - latest.batteryLevel) <= NO_PIVOT_LEVEL_MATCH_TOLERANCE
+
+            if (!canUseFallbackWindow) {
+                return@withContext emptyList()
+            }
+
+            dao.getPredictionWindow(PREDICTION_WINDOW_SIZE)
+        } else {
+            dao.getPredictionWindowSince(
+                sinceEpochMillis = lastChargingTs,
+                windowSize = PREDICTION_WINDOW_SIZE
+            )
+        }
+
+        val sessionChronological = sessionWindowDesc.asReversed()
+        val cleanedSession = keepMostRecentContinuousDischargeBlock(sessionChronological)
+
+        if (cleanedSession.size < MIN_SESSION_SAMPLES_FOR_PREDICTION) {
+            emptyList()
+        } else {
+            cleanedSession
+        }
+    }
+
+    /**
+     * One-time soft cleanup for existing logs.
      */
     suspend fun cleanupHistoricalData(): CleanupResult = withContext(ioDispatcher) {
-            val removedCharging = dao.deleteChargingRows()
-            val removedSpikes = dao.deleteOrphanUpwardSpikes()
+            val removedOldRows = dao.deleteOlderThan(System.currentTimeMillis() - THIRTY_DAYS_MS)
             CleanupResult(
-                deletedChargingRows = removedCharging,
-                deletedOrphanSpikes = removedSpikes
+                deletedChargingRows = 0,
+                deletedOrphanSpikes = removedOldRows
             )
         }
 
@@ -89,7 +128,11 @@ class BatteryRepository(
     companion object {
         const val INSERT_SKIPPED_ID = -1L
         private const val ML_UPWARD_TOLERANCE_PERCENT = 0.15f
-        private const val NEW_CYCLE_LEVEL_DELTA_PERCENT = 2.0f
+        private const val PREDICTION_WINDOW_SIZE = 50
+        private const val MIN_SESSION_SAMPLES_FOR_PREDICTION = 2
+        private const val THIRTY_DAYS_MS = 30L * 24L * 60L * 60L * 1000L
+        private const val STALE_LEVEL_JUMP_THRESHOLD_PERCENT = 5.0f
+        private const val NO_PIVOT_LEVEL_MATCH_TOLERANCE = 1.0f
     }
 }
 
