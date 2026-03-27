@@ -128,7 +128,7 @@ class BatteryRepository(
     companion object {
         const val INSERT_SKIPPED_ID = -1L
         private const val ML_UPWARD_TOLERANCE_PERCENT = 0.15f
-        private const val PREDICTION_WINDOW_SIZE = 20
+        private const val PREDICTION_WINDOW_SIZE = 25
         private const val MIN_SESSION_SAMPLES_FOR_PREDICTION = 2
         private const val THIRTY_DAYS_MS = 30L * 24L * 60L * 60L * 1000L
         private const val STALE_LEVEL_JUMP_THRESHOLD_PERCENT = 5.0f
