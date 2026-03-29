@@ -37,15 +37,6 @@ class PredictionEngine(
         val batteryDrop = lastBatteryLevel - currentBatteryLevel
         return elapsedMs >= MIN_RETRAIN_INTERVAL_MS || batteryDrop >= MIN_RETRAIN_DROP_PERCENT
     }
-
-    /**
-     * Fits y = m*x + b where:
-     * - x: cumulative elapsed minutes between accepted 1% drop anchors
-     * - y: battery percentage
-     *
-     * Returns the smoothed prediction in hours by applying an asymmetric EMA shock absorber.
-     * Returns INVALID_PREDICTION_HOURS when math is not reliable.
-     */
     suspend fun predictRemainingHours(samples: List<BatterySample>): PredictionResult =
         try {
             withContext(computeDispatcher) {
@@ -60,14 +51,16 @@ class PredictionEngine(
                 return@withContext PredictionResult.invalid()
             }
 
-            val n = anchors.size.toDouble()
-
-            var sumX = 0.0
-            var sumY = 0.0
-            var sumXY = 0.0
-            var sumX2 = 0.0
+            // Weighted OLS: assign higher weights to more recent samples
+            val n = anchors.size
+            var sumW = 0.0
+            var sumWX = 0.0
+            var sumWY = 0.0
+            var sumWXY = 0.0
+            var sumWX2 = 0.0
             var elapsedMinutes = 0.0
 
+            // Linear weights: oldest=1, newest=n
             for (index in anchors.indices) {
                 val sample = anchors[index]
                 if (index > 0) {
@@ -75,22 +68,23 @@ class PredictionEngine(
                         .coerceAtLeast(0L)
                     elapsedMinutes += deltaMs / 60_000.0
                 }
-
                 val xMinutes = elapsedMinutes
                 val y = sample.batteryLevel.toDouble()
-                sumX += xMinutes
-                sumY += y
-                sumXY += xMinutes * y
-                sumX2 += xMinutes * xMinutes
+                val weight = (index + 1).toDouble() // Linear: 1, 2, ..., n
+                sumW += weight
+                sumWX += weight * xMinutes
+                sumWY += weight * y
+                sumWXY += weight * xMinutes * y
+                sumWX2 += weight * xMinutes * xMinutes
             }
 
-            val denominator = (n * sumX2) - (sumX * sumX)
+            val denominator = (sumW * sumWX2) - (sumWX * sumWX)
             if (abs(denominator) < 1e-12) {
                 return@withContext PredictionResult.invalid()
             }
 
-            val slope = ((n * sumXY) - (sumX * sumY)) / denominator
-            val intercept = (sumY - (slope * sumX)) / n
+            val slope = ((sumW * sumWXY) - (sumWX * sumWY)) / denominator
+            val intercept = (sumWY - (slope * sumWX)) / sumW
 
             // If battery is flat/rising, OLS cannot estimate time-to-zero reliably.
             if (slope >= 0.0) {
@@ -128,13 +122,13 @@ class PredictionEngine(
                 ?.let { (alpha * boundedRawHours) + ((1.0 - alpha) * it) }
                 ?: boundedRawHours
 
-                previousEtaHours = smoothedHours
-                PredictionResult(
-                    slope = slope,
-                    intercept = intercept,
-                    rawHours = rawHours,
-                    smoothedHours = smoothedHours
-                )
+            previousEtaHours = smoothedHours
+            PredictionResult(
+                slope = slope,
+                intercept = intercept,
+                rawHours = rawHours,
+                smoothedHours = smoothedHours
+            )
             }
         } catch (cancelled: CancellationException) {
             throw cancelled

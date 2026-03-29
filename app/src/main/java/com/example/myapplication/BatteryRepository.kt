@@ -36,18 +36,9 @@ class BatteryRepository(
     suspend fun clearAllSamples(): Unit = withContext(ioDispatcher) {
         dao.clearAllSamples()
     }
-
-    /**
-     * Forces a state-marker write (power connected/disconnected) even when level did not drop.
-     */
     suspend fun insertStateSample(sample: BatterySample): Long = withContext(ioDispatcher) {
         dao.insertSample(sample)
     }
-
-    /**
-     * Fetches current-session discharging points only (after the most recent charging pivot)
-     * and returns them in chronological order.
-     */
     suspend fun getRecentDischargingWindow(currentSystemBatteryLevel: Float): List<BatterySample> = withContext(ioDispatcher) {
         val latest = dao.getLatestSample()
 
@@ -91,9 +82,6 @@ class BatteryRepository(
         }
     }
 
-    /**
-     * One-time soft cleanup for existing logs.
-     */
     suspend fun cleanupHistoricalData(): CleanupResult = withContext(ioDispatcher) {
             val removedOldRows = dao.deleteOlderThan(System.currentTimeMillis() - THIRTY_DAYS_MS)
             CleanupResult(
