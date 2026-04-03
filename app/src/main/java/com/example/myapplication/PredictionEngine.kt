@@ -51,8 +51,18 @@ class PredictionEngine(
                 return@withContext PredictionResult.invalid()
             }
 
+            val timeGapsMs = LongArray(anchors.size) { index ->
+                if (index == 0) 0L else (anchors[index].timestampEpochMillis - anchors[index - 1].timestampEpochMillis).coerceAtLeast(0L)
+            } // Precompute anchor spacing so stale idle samples can be penalized in-memory only.
+
+            val nonZeroGapCount = timeGapsMs.count { it > 0L }
+            val averageVelocityMs = if (nonZeroGapCount > 0) {
+                timeGapsMs.filter { it > 0L }.average()
+            } else {
+                0.0
+            } // Derive the baseline velocity from real movement gaps for the stale-sample check.
+
             // Weighted OLS: assign higher weights to more recent samples
-            val n = anchors.size
             var sumW = 0.0
             var sumWX = 0.0
             var sumWY = 0.0
@@ -64,13 +74,16 @@ class PredictionEngine(
             for (index in anchors.indices) {
                 val sample = anchors[index]
                 if (index > 0) {
-                    val deltaMs = (sample.timestampEpochMillis - anchors[index - 1].timestampEpochMillis)
-                        .coerceAtLeast(0L)
-                    elapsedMinutes += deltaMs / 60_000.0
+                    elapsedMinutes += timeGapsMs[index] / 60_000.0 // Reuse the precomputed gap so the penalty math stays in sync.
                 }
                 val xMinutes = elapsedMinutes
                 val y = sample.batteryLevel.toDouble()
-                val weight = (index + 1).toDouble() // Linear: 1, 2, ..., n
+                val baseWeight = (index + 1).toDouble() // Keep the original linear weight as the starting point.
+                val weight = if (averageVelocityMs > 0.0 && timeGapsMs[index] > averageVelocityMs * 2.0) {
+                    baseWeight * 0.1 // Down-weight stale idle samples so heavy-usage drops dominate the fit.
+                } else {
+                    baseWeight // Preserve the normal influence when the sample timing matches the current pattern.
+                }
                 sumW += weight
                 sumWX += weight * xMinutes
                 sumWY += weight * y
