@@ -32,6 +32,11 @@ private const val LOG_TAG = "MainActivity"
 
 class MainActivity : AppCompatActivity() {
 
+    private enum class RefreshSource {
+        AUTO,
+        MANUAL
+    }
+
     // Cached colors — avoids Color.parseColor() on every UI refresh
     private companion object {
         val COLOR_GREEN  = android.graphics.Color.parseColor("#00C853")
@@ -44,6 +49,8 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_DB_NUKE_DONE = "db_nuke_fresh_session_v1"
         private const val REQUIRED_CHARGING_TICKS_FOR_RESET = 2
         private const val SERVICE_RECOVERY_COOLDOWN_MS = 60_000L
+        private const val MANUAL_REFRESH_THROTTLE_MS = 2_500L
+        private const val MANUAL_REFRESH_VISUAL_DELAY_MS = 600L
     }
 
     private lateinit var sampler: BatterySampler
@@ -70,6 +77,8 @@ class MainActivity : AppCompatActivity() {
     private var lastPredictionRunTimeMs: Long = 0L
     private var lastPredictionBatteryLevel: Float = 100f
     private var cachedSmoothedHours: Double? = null
+    private var latestObservedBatteryLevel: Float? = null
+    private var lastManualRefreshTapTimeMs: Long = 0L
 
     private val minSamplesToFit = BatteryPredictionUiFormatter.COLD_START_MIN_SAMPLES
     private val samplingIntervalMs = 30_000L
@@ -112,6 +121,10 @@ class MainActivity : AppCompatActivity() {
 
         sampler = BatterySampler(this, BatteryLoggingForegroundService::class.java.name)
         promptIgnoreBatteryOptimizationsIfNeeded()
+
+        timeRemainingText.setOnClickListener {
+            requestManualPredictionRefresh()
+        }
         
         // ── Request POST_NOTIFICATIONS permission (Android 13+) ──
         requestNotificationPermissionIfNeeded()
@@ -215,7 +228,12 @@ class MainActivity : AppCompatActivity() {
                         if (deleted > 0) Log.d(LOG_TAG, "Pruned $deleted old samples")
                     }
 
-                    updatePrediction(sample.batteryLevel)
+                    latestObservedBatteryLevel = sample.batteryLevel
+                    refreshPrediction(
+                        currentSystemBatteryLevel = sample.batteryLevel,
+                        source = RefreshSource.AUTO,
+                        forceRecompute = false
+                    )
                 } else {
                     withContext(Dispatchers.Main) {
                         batteryStatusText.text = "Calculating..."
@@ -236,8 +254,47 @@ class MainActivity : AppCompatActivity() {
         predictionJob = null
     }
 
-    private fun updatePrediction(currentSystemBatteryLevel: Float) {
-        predictionJob?.cancel()
+    private fun requestManualPredictionRefresh() {
+        val batteryLevel = latestObservedBatteryLevel
+        if (batteryLevel == null) {
+            Toast.makeText(this, getString(R.string.prediction_refresh_no_data), Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        if (now - lastManualRefreshTapTimeMs < MANUAL_REFRESH_THROTTLE_MS) {
+            todText.text = getString(R.string.prediction_refresh_wait)
+            return
+        }
+
+        if (predictionJob?.isActive == true) {
+            todText.text = getString(R.string.prediction_refresh_busy)
+            return
+        }
+
+        lastManualRefreshTapTimeMs = now
+        todText.text = getString(R.string.prediction_refreshing)
+        timeRemainingText.text = getString(R.string.prediction_refreshing)
+        lifecycleScope.launch {
+            // Give the user instant feedback before kicking off heavier prediction work.
+            delay(MANUAL_REFRESH_VISUAL_DELAY_MS)
+            refreshPrediction(
+                currentSystemBatteryLevel = batteryLevel,
+                source = RefreshSource.MANUAL,
+                forceRecompute = true
+            )
+        }
+    }
+
+    private fun refreshPrediction(
+        currentSystemBatteryLevel: Float,
+        source: RefreshSource,
+        forceRecompute: Boolean
+    ) {
+        if (source == RefreshSource.AUTO) {
+            predictionJob?.cancel()
+        }
+
         predictionJob = lifecycleScope.launch {
             try {
                 val olsSamples = withContext(Dispatchers.IO) {
@@ -272,18 +329,21 @@ class MainActivity : AppCompatActivity() {
                     lastBatteryLevel = lastPredictionBatteryLevel
                 )
 
+                var manualMathInvalid = false
+
                 Log.d(LOG_TAG, "📊 Prediction check: samples=${olsSamples.size}, shouldRun=$shouldRunMath, cached=${cachedSmoothedHours}")
 
-                if (shouldRunMath || cachedSmoothedHours == null) {
+                if (forceRecompute || shouldRunMath || cachedSmoothedHours == null) {
                     val result = predictionEngine.predictRemainingHours(olsSamples)
                     lastPredictionRunTimeMs = nowEpochMillis
                     lastPredictionBatteryLevel = currentBatteryLevel
                     
                     Log.d(LOG_TAG, "🔬 OLS Result: raw=${result.rawHours}h, smoothed=${result.smoothedHours}h, slope=${result.slope}")
                     
-                    cachedSmoothedHours = if (result.smoothedHours > 0.0) result.smoothedHours else null
-                    
-                    if (cachedSmoothedHours == null) {
+                    if (result.smoothedHours > 0.0) {
+                        cachedSmoothedHours = result.smoothedHours
+                    } else {
+                        manualMathInvalid = source == RefreshSource.MANUAL
                         Log.w(LOG_TAG, "⚠️ OLS returned invalid result: rawHours=${result.rawHours}, smoothedHours=${result.smoothedHours}")
                     }
                 } else {
@@ -309,18 +369,23 @@ class MainActivity : AppCompatActivity() {
                         rawPredictedHours = predictedHoursForUi
                     )
 
-                    todText.text = if (tDeathEpochMillis != null)
-                        "Dies at ${formatAbsoluteTime(tDeathEpochMillis)}"
-                    else
-                        ""
+                    todText.text = when {
+                        tDeathEpochMillis != null -> "Dies at ${formatAbsoluteTime(tDeathEpochMillis)}"
+                        source == RefreshSource.MANUAL && manualMathInvalid -> getString(R.string.prediction_still_calculating)
+                        source == RefreshSource.MANUAL -> getString(R.string.prediction_refreshed)
+                        else -> ""
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(LOG_TAG, "Error updating prediction", e)
                 withContext(Dispatchers.Main) {
-                    timeRemainingText.text = "Error"
-                    todText.text           = e.message ?: "Unknown error"
+                    timeRemainingText.text = BatteryPredictionUiFormatter.remainingText(
+                        sampleCount = minSamplesToFit,
+                        rawPredictedHours = cachedSmoothedHours
+                    )
+                    todText.text = getString(R.string.prediction_still_calculating)
                 }
             }
         }
@@ -329,7 +394,7 @@ class MainActivity : AppCompatActivity() {
     // ── Formatting helpers ──────────────────────────────────────────────────
 
     private fun formatAbsoluteTime(timestampMs: Long): String =
-        SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestampMs))
+        SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(timestampMs))
 
     private fun batteryColor(level: Float) = when {
         level > 50f -> COLOR_GREEN

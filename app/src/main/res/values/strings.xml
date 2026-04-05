@@ -1,3 +1,10 @@
 <resources>
     <string name="app_name">Battery Forecast</string>
+    <string name="eta_tap_to_refresh_description">Estimated battery time remaining, tap to refresh</string>
+    <string name="prediction_refresh_no_data">Waiting for first battery sample</string>
+    <string name="prediction_refresh_wait">Please wait before refreshing again</string>
+    <string name="prediction_refresh_busy">Refresh already in progress</string>
+    <string name="prediction_refreshing">Refreshing...</string>
+    <string name="prediction_refreshed">Prediction refreshed</string>
+    <string name="prediction_still_calculating">Still calculating...</string>
 </resources>
