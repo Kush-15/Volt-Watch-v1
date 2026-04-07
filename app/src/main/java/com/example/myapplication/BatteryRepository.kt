@@ -73,7 +73,7 @@ class BatteryRepository(
         }
 
         val sessionChronological = sessionWindowDesc.asReversed()
-        val cleanedSession = keepMostRecentContinuousDischargeBlock(sessionChronological)
+        val cleanedSession = getCleanWindowSamples(sessionChronological)
 
         if (cleanedSession.size < MIN_SESSION_SAMPLES_FOR_PREDICTION) {
             emptyList()
@@ -90,6 +90,10 @@ class BatteryRepository(
             )
         }
 
+    private fun getCleanWindowSamples(chronological: List<BatterySample>): List<BatterySample> {
+        return keepMostRecentContinuousDischargeBlock(chronological)
+    }
+
     private fun keepMostRecentContinuousDischargeBlock(
         chronological: List<BatterySample>
     ): List<BatterySample> {
@@ -102,7 +106,9 @@ class BatteryRepository(
         for (i in chronological.lastIndex - 1 downTo 0) {
             val older = chronological[i]
             val hasUpwardBreak = newer.batteryLevel > older.batteryLevel + ML_UPWARD_TOLERANCE_PERCENT
-            if (hasUpwardBreak) {
+            val gapMs = (newer.timestampEpochMillis - older.timestampEpochMillis).coerceAtLeast(0L)
+            val hasLargeIdleGapBreak = gapMs > IDLE_GAP_BREAK_MS
+            if (hasUpwardBreak || hasLargeIdleGapBreak) {
                 break
             }
 
@@ -121,5 +127,6 @@ class BatteryRepository(
         private const val THIRTY_DAYS_MS = 30L * 24L * 60L * 60L * 1000L
         private const val STALE_LEVEL_JUMP_THRESHOLD_PERCENT = 5.0f
         private const val NO_PIVOT_LEVEL_MATCH_TOLERANCE = 1.0f
+        private const val IDLE_GAP_BREAK_MS = 30L * 60L * 1000L
     }
 }
