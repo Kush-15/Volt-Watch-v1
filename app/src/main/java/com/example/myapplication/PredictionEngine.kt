@@ -122,8 +122,24 @@ class PredictionEngine(
                 )
             }
 
+            val sampleCount = anchors.size
+            val confidence = confidenceFromSampleCount(sampleCount)
+            val fallbackHours = batteryPercentToHours(
+                batteryPercent = currentBattery,
+                minutesPerPercent = GLOBAL_FALLBACK_MINUTES_PER_PERCENT
+            )
+
+            // Blend OLS with a global fallback so early-session predictions are less volatile.
+            val blendedHours = (confidence * rawHours) + ((1.0 - confidence) * fallbackHours)
+            val physicallyClampedHours = blendedHours.coerceAtMost(
+                batteryPercentToHours(
+                    batteryPercent = currentBattery,
+                    minutesPerPercent = MAX_PHYSICAL_MINUTES_PER_PERCENT
+                )
+            )
+
             // Bound raw ETA jumps against the previous UI ETA to avoid violent one-tick swings.
-            val boundedRawHours = boundRawEta(rawHours, previousEtaHours)
+            val boundedRawHours = boundRawEta(physicallyClampedHours, previousEtaHours)
 
             val alpha = when {
                 previousEtaHours == null -> 1.0
@@ -155,12 +171,28 @@ class PredictionEngine(
         const val OLS_WINDOW_SIZE = 20
         const val MIN_SAMPLES_FOR_PREDICTION = 5
         const val INVALID_PREDICTION_HOURS = -1.0
+        private const val GLOBAL_FALLBACK_MINUTES_PER_PERCENT = 7.0
+        private const val MAX_PHYSICAL_MINUTES_PER_PERCENT = 12.0
         private const val MIN_LEVEL_DROP_STEP_PERCENT = 1.0f
         private const val EMA_ALPHA_DECAY = 0.3
         private const val EMA_ALPHA_RECOVERY = 0.7
         private const val MIN_ETA_STEP_FACTOR = 0.6
         private const val MAX_ETA_STEP_FACTOR = 1.8
         private const val MAX_ABSOLUTE_ETA_HOURS = 48.0
+    }
+
+    private fun confidenceFromSampleCount(sampleCount: Int): Double = when {
+        sampleCount < 5 -> 0.0
+        sampleCount < 10 -> 0.5
+        sampleCount < 20 -> 0.8
+        else -> 1.0
+    }
+
+    private fun batteryPercentToHours(
+        batteryPercent: Double,
+        minutesPerPercent: Double
+    ): Double {
+        return (batteryPercent * minutesPerPercent) / 60.0
     }
 
     private fun boundRawEta(rawHours: Double, previousHours: Double?): Double {
