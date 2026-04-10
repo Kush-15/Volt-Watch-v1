@@ -57,6 +57,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var database: BatteryDatabase
     private lateinit var dao: BatterySampleDao
     private lateinit var repository: BatteryRepository
+    private lateinit var sessionManager: SessionManager
     private val predictionEngine = PredictionEngine()
 
     // ── UI views ──
@@ -116,6 +117,7 @@ class MainActivity : AppCompatActivity() {
         database = BatteryDatabase.getInstance(applicationContext)
         dao = database.batterySampleDao()
         repository = BatteryRepository(dao)
+        sessionManager = SessionManager(repository) // Layer 2: Data preparation (fetches from Layer 1)
         runOneTimeDbNukeIfNeeded()
         runOneTimeHistoricalCleanupIfNeeded()
 
@@ -297,30 +299,32 @@ class MainActivity : AppCompatActivity() {
 
         predictionJob = lifecycleScope.launch {
             try {
-                val olsSamples = withContext(Dispatchers.IO) {
-                    repository.getRecentDischargingWindow(currentSystemBatteryLevel)
+                // Layer 1 (Storage) → Layer 2 (Data Prep) → Layer 3 (ML)
+                // SessionManager handles all filtering, deduplication, idle-gap detection, and validation.
+                val cleanSamples = withContext(Dispatchers.IO) {
+                    sessionManager.prepareCleanSamplesForPrediction(currentSystemBatteryLevel)
                 }
 
-                val graphPoints = BatteryGraphSanitizer.buildDisplayPoints(olsSamples)
+                val graphPoints = BatteryGraphSanitizer.buildDisplayPoints(cleanSamples)
 
                 // ── NEW: Changed threshold from minSamplesToFit (6) to 10 for better stability ──
                 // With 10+ samples, the OLS fit is more numerically stable and less prone to noise
-                if (olsSamples.size < 10) {
-                    Log.d(LOG_TAG, "❌ Not enough samples: ${olsSamples.size}/10. Showing 'Learning...'")
+                if (cleanSamples.size < 10) {
+                    Log.d(LOG_TAG, "❌ Not enough samples: ${cleanSamples.size}/10. Showing 'Learning...'")
                     withContext(Dispatchers.Main) {
-                        sampleCountText.text   = "${olsSamples.size}/10 samples"
+                        sampleCountText.text   = "${cleanSamples.size}/10 samples"
                         timeRemainingText.text = BatteryPredictionUiFormatter.remainingText(
-                            sampleCount       = olsSamples.size,
+                            sampleCount       = cleanSamples.size,
                             rawPredictedHours = null
                         )
-                        todText.text = "Need ${10 - olsSamples.size} more reading(s)"
+                        todText.text = "Need ${10 - cleanSamples.size} more reading(s)"
                         batteryGraph.setData(graphPoints, null)
                     }
                     return@launch
                 }
 
                 val nowEpochMillis = System.currentTimeMillis()
-                val currentBatteryLevel = olsSamples.last().batteryLevel
+                val currentBatteryLevel = cleanSamples.last().batteryLevel
 
                 val shouldRunMath = predictionEngine.shouldRunPrediction(
                     currentTimeMs = nowEpochMillis,
@@ -331,10 +335,10 @@ class MainActivity : AppCompatActivity() {
 
                 var manualMathInvalid = false
 
-                Log.d(LOG_TAG, "📊 Prediction check: samples=${olsSamples.size}, shouldRun=$shouldRunMath, cached=${cachedSmoothedHours}")
+                Log.d(LOG_TAG, "📊 Prediction check: samples=${cleanSamples.size}, shouldRun=$shouldRunMath, cached=${cachedSmoothedHours}")
 
                 if (forceRecompute || shouldRunMath || cachedSmoothedHours == null) {
-                    val result = predictionEngine.predictRemainingHours(olsSamples)
+                    val result = predictionEngine.predictRemainingHours(cleanSamples)
                     lastPredictionRunTimeMs = nowEpochMillis
                     lastPredictionBatteryLevel = currentBatteryLevel
                     
@@ -361,11 +365,11 @@ class MainActivity : AppCompatActivity() {
                 Log.d(LOG_TAG, "📱 UI Update: predictedHours=$predictedHoursForUi, tDeath=$tDeathEpochMillis")
 
                 withContext(Dispatchers.Main) {
-                    sampleCountText.text = "${olsSamples.size} samples"
+                    sampleCountText.text = "${cleanSamples.size} samples"
                     batteryGraph.setData(graphPoints, tDeathEpochMillis)
 
                     timeRemainingText.text = BatteryPredictionUiFormatter.remainingText(
-                        sampleCount       = olsSamples.size,
+                        sampleCount       = cleanSamples.size,
                         rawPredictedHours = predictedHoursForUi
                     )
 
@@ -436,10 +440,10 @@ class MainActivity : AppCompatActivity() {
         if (prefs.getBoolean(KEY_HISTORY_CLEANUP_DONE, false)) return
 
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = repository.cleanupHistoricalData()
+            repository.cleanupHistoricalData()
             Log.i(
                 LOG_TAG,
-                "Historical cleanup completed: removedCharging=${result.deletedChargingRows}, removedSpikes=${result.deletedOrphanSpikes}"
+                "Historical cleanup completed: deleted rows older than 30 days"
             )
             prefs.edit().putBoolean(KEY_HISTORY_CLEANUP_DONE, true).apply()
         }

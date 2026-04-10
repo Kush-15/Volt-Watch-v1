@@ -131,15 +131,9 @@ class PredictionEngine(
 
             // Blend OLS with a global fallback so early-session predictions are less volatile.
             val blendedHours = (confidence * rawHours) + ((1.0 - confidence) * fallbackHours)
-            val physicallyClampedHours = blendedHours.coerceAtMost(
-                batteryPercentToHours(
-                    batteryPercent = currentBattery,
-                    minutesPerPercent = MAX_PHYSICAL_MINUTES_PER_PERCENT
-                )
-            )
 
             // Bound raw ETA jumps against the previous UI ETA to avoid violent one-tick swings.
-            val boundedRawHours = boundRawEta(physicallyClampedHours, previousEtaHours)
+            val boundedRawHours = boundRawEta(blendedHours, previousEtaHours)
 
             val alpha = when {
                 previousEtaHours == null -> 1.0
@@ -151,12 +145,16 @@ class PredictionEngine(
                 ?.let { (alpha * boundedRawHours) + ((1.0 - alpha) * it) }
                 ?: boundedRawHours
 
-            previousEtaHours = smoothedHours
+            val physicalCapHours = (currentBattery * PHYSICAL_CAP_MINUTES_PER_PERCENT) / 60.0
+            val physicalFloorHours = (currentBattery * PHYSICAL_FLOOR_MINUTES_PER_PERCENT) / 60.0
+            val finalClampedHours = smoothedHours.coerceIn(physicalFloorHours, physicalCapHours)
+
+            previousEtaHours = finalClampedHours
             PredictionResult(
                 slope = slope,
                 intercept = intercept,
                 rawHours = rawHours,
-                smoothedHours = smoothedHours
+                smoothedHours = finalClampedHours
             )
             }
         } catch (cancelled: CancellationException) {
@@ -168,11 +166,13 @@ class PredictionEngine(
     companion object {
         const val MIN_RETRAIN_INTERVAL_MS = 300_000L
         const val MIN_RETRAIN_DROP_PERCENT = 2.0f
-        const val OLS_WINDOW_SIZE = 20
+        const val OLS_WINDOW_SIZE = 25
         const val MIN_SAMPLES_FOR_PREDICTION = 5
         const val INVALID_PREDICTION_HOURS = -1.0
         private const val GLOBAL_FALLBACK_MINUTES_PER_PERCENT = 7.0
-        private const val MAX_PHYSICAL_MINUTES_PER_PERCENT = 12.0
+        // SACRED: Hard cap on max ETA. Cannot be removed or relaxed. Protects against ML hallucinations.
+        private const val PHYSICAL_CAP_MINUTES_PER_PERCENT = 7.0
+        private const val PHYSICAL_FLOOR_MINUTES_PER_PERCENT = 2.0 // Absolute fastest possible drain.
         private const val MIN_LEVEL_DROP_STEP_PERCENT = 1.0f
         private const val EMA_ALPHA_DECAY = 0.3
         private const val EMA_ALPHA_RECOVERY = 0.7
@@ -238,4 +238,3 @@ data class PredictionResult(
         )
     }
 }
-

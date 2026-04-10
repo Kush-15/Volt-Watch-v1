@@ -44,6 +44,11 @@ class BatteryLoggingForegroundService : Service() {
                 status == BatteryManager.BATTERY_STATUS_CHARGING ||
                 status == BatteryManager.BATTERY_STATUS_FULL
 
+            Log.d(
+                SERVICE_LOG_TAG,
+                "batteryEvent level=$normalizedLevel% status=$status plugged=$plugged isCharging=$isCharging lastRecordedLevel=$lastRecordedLevel"
+            )
+
             if (isCharging) {
                 serviceScope.launch {
                     insertChargingMarker(normalizedLevel)
@@ -107,6 +112,7 @@ class BatteryLoggingForegroundService : Service() {
         repository = BatteryRepository(dao)
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         lastRecordedLevel = prefs.getInt(KEY_LAST_RECORDED_LEVEL, LEVEL_UNINITIALIZED)
+        Log.d(SERVICE_LOG_TAG, "onCreate persistedBaseline=$lastRecordedLevel")
 
         // If no persisted baseline exists, seed from the most recent row in Room.
         if (lastRecordedLevel == LEVEL_UNINITIALIZED) {
@@ -123,11 +129,13 @@ class BatteryLoggingForegroundService : Service() {
 
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification())
+        Log.d(SERVICE_LOG_TAG, "startForeground completed notificationId=$NOTIFICATION_ID")
         registerBatteryReceiver()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Self-heal: request automatic restart if process is killed for memory pressure.
+        Log.d(SERVICE_LOG_TAG, "onStartCommand flags=$flags startId=$startId returning=START_STICKY")
         return START_STICKY
     }
 
@@ -158,7 +166,10 @@ class BatteryLoggingForegroundService : Service() {
             val id = repository.insertSample(sample)
             if (id > 0) {
                 persistLastRecordedLevel(currentLevel)
-                Log.d(SERVICE_LOG_TAG, "Logged battery drop sample at $now (level=$currentLevel%, id=$id)")
+                Log.d(
+                    SERVICE_LOG_TAG,
+                    "insertDischargeSample INSERTED id=$id level=$currentLevel% ts=$now isCharging=${sample.isCharging}"
+                )
             } else {
                 // Keep service baseline aligned with DB truth when repository rejects the row.
                 val latestDbLevel = dao.getLatestSample()?.batteryLevel?.toInt()
@@ -167,7 +178,7 @@ class BatteryLoggingForegroundService : Service() {
                 }
                 Log.d(
                     SERVICE_LOG_TAG,
-                    "Skipped drop insert at level=$currentLevel% (dbLatest=${latestDbLevel ?: "none"})"
+                    "insertDischargeSample SKIPPED level=$currentLevel% ts=$now isCharging=${sample.isCharging} dbLatest=${latestDbLevel ?: "none"}"
                 )
             }
 
@@ -201,7 +212,7 @@ class BatteryLoggingForegroundService : Service() {
             persistLastRecordedLevel(normalizedLevel)
             Log.d(
                 SERVICE_LOG_TAG,
-                "Inserted power transition sample (charging=$forceCharging, level=$normalizedLevel%)"
+                "insertPowerTransitionSample INSERTED level=$normalizedLevel% ts=$now isCharging=$forceCharging"
             )
         } catch (t: Throwable) {
             Log.e(SERVICE_LOG_TAG, "Failed to insert power transition sample", t)
@@ -225,7 +236,10 @@ class BatteryLoggingForegroundService : Service() {
 
             repository.insertStateSample(chargingMarker)
             persistLastRecordedLevel(level)
-            Log.d(SERVICE_LOG_TAG, "Inserted charging marker (level=$level%)")
+            Log.d(
+                SERVICE_LOG_TAG,
+                "insertChargingMarker INSERTED level=$level% ts=$now isCharging=${chargingMarker.isCharging}"
+            )
         } catch (t: Throwable) {
             Log.e(SERVICE_LOG_TAG, "Failed to insert charging marker", t)
         }
@@ -247,6 +261,10 @@ class BatteryLoggingForegroundService : Service() {
 
             val latest = dao.getLatestSample()
             val shouldInsertRecoveryMarker = latest == null || latest.isCharging != isChargingNow
+            Log.d(
+                SERVICE_LOG_TAG,
+                "recoverChargingStateOnRestart latestCharging=${latest?.isCharging ?: "none"} nowCharging=$isChargingNow latestLevel=${latest?.batteryLevel?.toInt() ?: "none"}% currentLevel=$normalizedLevel% insertMarker=$shouldInsertRecoveryMarker"
+            )
             if (shouldInsertRecoveryMarker) {
                 val voltageMv = sticky.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)
                 val marker = BatterySample(
@@ -293,6 +311,7 @@ class BatteryLoggingForegroundService : Service() {
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
         }
+        Log.d(SERVICE_LOG_TAG, "Registered ACTION_BATTERY_CHANGED receiver")
 
         val powerFilter = IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
@@ -308,6 +327,7 @@ class BatteryLoggingForegroundService : Service() {
                 ContextCompat.RECEIVER_NOT_EXPORTED
             )
         }
+        Log.d(SERVICE_LOG_TAG, "Registered power transition receivers")
     }
 
     private fun unregisterReceiverSafely() {
