@@ -68,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         private const val SERVICE_RECOVERY_COOLDOWN_MS = 60_000L
         private const val MANUAL_REFRESH_THROTTLE_MS = 2_500L
         private const val MANUAL_REFRESH_VISUAL_DELAY_MS = 600L
+        private const val ALERT_PREFS_NAME = "volt_watch_alerts_prefs"
     }
 
     private lateinit var sampler: BatterySampler
@@ -551,6 +552,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val predictedHoursForUi = cachedSmoothedHours
+                persistEtaForAlerts(predictedHoursForUi)
                 val tDeathEpochMillis = predictedHoursForUi
                     ?.takeIf {
                         it > 0.0 &&
@@ -989,6 +991,19 @@ class MainActivity : AppCompatActivity() {
             background.setColor(color)
         } else {
             homeConfidenceDot.setBackgroundColor(color)
+        }
+    }
+
+    private fun persistEtaForAlerts(predictedHours: Double?) {
+        val prefs = getSharedPreferences(ALERT_PREFS_NAME, MODE_PRIVATE)
+        val etaMinutes = predictedHours
+            ?.takeIf { it.isFinite() && it > 0.0 }
+            ?.let { (it * 60.0).toInt().coerceAtLeast(1) }
+
+        if (etaMinutes != null) {
+            prefs.edit().putInt(BatteryAlertNotifier.KEY_LAST_ETA_MINUTES, etaMinutes).apply()
+        } else {
+            prefs.edit().remove(BatteryAlertNotifier.KEY_LAST_ETA_MINUTES).apply()
         }
     }
 

@@ -35,6 +35,8 @@ class BatteryLoggingForegroundService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != Intent.ACTION_BATTERY_CHANGED) return
 
+            BatteryAlertNotifier.handleBatteryChanged(this@BatteryLoggingForegroundService, intent)
+
             val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
             if (level < 0 || scale <= 0) return

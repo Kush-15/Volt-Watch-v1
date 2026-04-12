@@ -14,6 +14,9 @@ class VoltWatchApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Log.d(APP_LOG_TAG, "🟢 Application onCreate() called")
+
+        BatteryAlertNotifier.createAlertsChannel(this)
+        Log.d(APP_LOG_TAG, "✅ Ensured battery alerts notification channel exists")
         
         WorkManager.getInstance(this).cancelUniqueWork("battery_periodic_sampling")
         Log.d(APP_LOG_TAG, "✅ Cancelled any existing WorkManager jobs")
