@@ -37,7 +37,10 @@ class PredictionEngine(
         val batteryDrop = lastBatteryLevel - currentBatteryLevel
         return elapsedMs >= MIN_RETRAIN_INTERVAL_MS || batteryDrop >= MIN_RETRAIN_DROP_PERCENT
     }
-    suspend fun predictRemainingHours(samples: List<BatterySample>): PredictionResult =
+    suspend fun predictRemainingHours(
+        samples: List<BatterySample>,
+        isDeviceIdle: Boolean = false // New: caller tells the engine whether the screen has been idle long enough to use the standby cap.
+    ): PredictionResult =
         try {
             withContext(computeDispatcher) {
                 if (samples.size < MIN_SAMPLES_FOR_PREDICTION) {
@@ -124,10 +127,7 @@ class PredictionEngine(
 
             val sampleCount = anchors.size
             val confidence = confidenceFromSampleCount(sampleCount)
-            val fallbackHours = batteryPercentToHours(
-                batteryPercent = currentBattery,
-                minutesPerPercent = GLOBAL_FALLBACK_MINUTES_PER_PERCENT
-            )
+            val fallbackHours = batteryPercentToHours(currentBattery) // New: keep the fallback estimate simple and stable for early-session blending.
 
             // Blend OLS with a global fallback so early-session predictions are less volatile.
             val blendedHours = (confidence * rawHours) + ((1.0 - confidence) * fallbackHours)
@@ -145,9 +145,14 @@ class PredictionEngine(
                 ?.let { (alpha * boundedRawHours) + ((1.0 - alpha) * it) }
                 ?: boundedRawHours
 
-            val physicalCapHours = (currentBattery * PHYSICAL_CAP_MINUTES_PER_PERCENT) / 60.0
-            val physicalFloorHours = (currentBattery * PHYSICAL_FLOOR_MINUTES_PER_PERCENT) / 60.0
-            val finalClampedHours = smoothedHours.coerceIn(physicalFloorHours, physicalCapHours)
+            val dynamicCapMinutesPerPercent = if (isDeviceIdle) { // New: idle users are allowed a much higher cap than active users.
+                IDLE_CAP_MINUTES_PER_PERCENT
+            } else {
+                ACTIVE_CAP_MINUTES_PER_PERCENT
+            }
+            val physicalCapHours = (currentBattery * dynamicCapMinutesPerPercent) / 60.0 // New: replace the hardcoded 7-minute cap with the idle-aware cap.
+            val physicalFloorHours = (currentBattery * PHYSICAL_FLOOR_MINUTES_PER_PERCENT) / 60.0 // Existing safety floor stays in place.
+            val finalClampedHours = smoothedHours.coerceIn(physicalFloorHours, physicalCapHours) // New: apply the final mode-specific cap before returning.
 
             previousEtaHours = finalClampedHours
             PredictionResult(
@@ -170,8 +175,8 @@ class PredictionEngine(
         const val MIN_SAMPLES_FOR_PREDICTION = 5
         const val INVALID_PREDICTION_HOURS = -1.0
         private const val GLOBAL_FALLBACK_MINUTES_PER_PERCENT = 7.0
-        // SACRED: Hard cap on max ETA. Cannot be removed or relaxed. Protects against ML hallucinations.
-        private const val PHYSICAL_CAP_MINUTES_PER_PERCENT = 7.0
+        private const val ACTIVE_CAP_MINUTES_PER_PERCENT = 7.0 // New: active users keep the original conservative cap.
+        private const val IDLE_CAP_MINUTES_PER_PERCENT = 35.0 // New: idle users get a higher cap so standby drain is not underestimated.
         private const val PHYSICAL_FLOOR_MINUTES_PER_PERCENT = 2.0 // Absolute fastest possible drain.
         private const val MIN_LEVEL_DROP_STEP_PERCENT = 1.0f
         private const val EMA_ALPHA_DECAY = 0.3
@@ -189,10 +194,9 @@ class PredictionEngine(
     }
 
     private fun batteryPercentToHours(
-        batteryPercent: Double,
-        minutesPerPercent: Double
+        batteryPercent: Double
     ): Double {
-        return (batteryPercent * minutesPerPercent) / 60.0
+        return (batteryPercent * GLOBAL_FALLBACK_MINUTES_PER_PERCENT) / 60.0 // New: use the built-in global fallback rate for the early prediction blend.
     }
 
     private fun boundRawEta(rawHours: Double, previousHours: Double?): Double {

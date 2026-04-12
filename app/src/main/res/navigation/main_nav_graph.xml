@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/main_nav_graph"
+    app:startDestination="@id/homeFragment">
+
+    <fragment
+        android:id="@+id/homeFragment"
+        android:name="com.example.myapplication.HomeFragment"
+        android:label="@string/nav_home">
+        <action
+            android:id="@+id/action_homeFragment_to_commuteCheckFragment"
+            app:destination="@id/commuteCheckFragment" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/historyFragment"
+        android:name="com.example.myapplication.HistoryFragment"
+        android:label="@string/nav_history" />
+
+    <fragment
+        android:id="@+id/reportFragment"
+        android:name="com.example.myapplication.ReportFragment"
+        android:label="@string/nav_report" />
+
+    <fragment
+        android:id="@+id/commuteCheckFragment"
+        android:name="com.example.myapplication.CommuteCheckFragment"
+        android:label="@string/commute_title" />
+</navigation>

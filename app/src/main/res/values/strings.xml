@@ -1,5 +1,10 @@
 <resources>
-    <string name="app_name">Battery Forecast</string>
+    <string name="app_name">Volt Watch</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_history">History</string>
+    <string name="nav_report">Report</string>
+    <string name="app_title">Volt Watch</string>
+
     <string name="eta_tap_to_refresh_description">Estimated battery time remaining, tap to refresh</string>
     <string name="prediction_refresh_no_data">Waiting for first battery sample</string>
     <string name="prediction_refresh_wait">Please wait before refreshing again</string>
@@ -7,4 +12,57 @@
     <string name="prediction_refreshing">Refreshing...</string>
     <string name="prediction_refreshed">Prediction refreshed</string>
     <string name="prediction_still_calculating">Still calculating...</string>
+
+    <string name="battery_good">Good</string>
+    <string name="battery_low">Low battery</string>
+    <string name="battery_critical">Critical battery</string>
+    <string name="estimated_battery_life">ESTIMATED BATTERY LIFE</string>
+    <string name="based_on_usage_patterns">Based on your usage patterns</string>
+    <string name="battery_history">BATTERY HISTORY</string>
+    <string name="predicted_legend">Predicted</string>
+    <string name="today_report">TODAYS REPORT</string>
+    <string name="drain_per_min">Drain/min</string>
+    <string name="screen_on">Screen on</string>
+    <string name="charged">Charged</string>
+    <string name="commute_prompt">Will you make your commute?</string>
+    <string name="check_action">Check &#8250;</string>
+
+    <string name="charging_fast">Fast charging</string>
+    <string name="charging_normal">Normal charging</string>
+    <string name="charging_trickle">Trickle charging</string>
+
+    <string name="history_last_7_days">Last 7 days</string>
+    <string name="drain_by_time_of_day">DRAIN BY TIME OF DAY</string>
+    <string name="axis_12am">12am</string>
+    <string name="axis_6am">6am</string>
+    <string name="axis_12pm">12pm</string>
+    <string name="axis_6pm">6pm</string>
+
+    <string name="todays_total_drain">Today total drain</string>
+    <string name="report_subtitle_format">across %1$.1fh since last full charge</string>
+    <string name="avg_drain_rate">Avg drain rate</string>
+    <string name="screen_on_time">Screen on time</string>
+    <string name="times_charged">Times charged</string>
+    <string name="longest_charge">Longest charge</string>
+    <string name="heaviest_usage">Heaviest usage</string>
+    <string name="model_status">Model status</string>
+    <string name="readings_collected">Readings collected</string>
+    <string name="confidence">Confidence</string>
+    <string name="prediction_accuracy">Prediction accuracy</string>
+
+    <string name="commute_back">&#8249; Back</string>
+    <string name="commute_title">Commute check</string>
+    <string name="commute_subtitle">Will your battery last the trip?</string>
+    <string name="trip_label">HOW LONG IS YOUR TRIP?</string>
+    <string name="battery_now">Battery now</string>
+    <string name="est_time_left">Est. time left</string>
+    <string name="youll_make_it">You will make it</string>
+    <string name="cutting_close">Cutting it close</string>
+    <string name="wont_make_it">Will not make it</string>
+    <string name="value_unavailable">—</string>
+    <string name="report_avg_drain_rate_value">%1$.2f%% / min</string>
+    <string name="report_screen_on_hours_value">%1$.1fh</string>
+    <string name="report_times_charged_value">%1$dx</string>
+    <string name="report_longest_charge_value">%1$d min</string>
+    <string name="report_readings_collected_value">%1$d / 10</string>
 </resources>

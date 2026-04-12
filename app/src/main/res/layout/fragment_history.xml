@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="4dp"
+            android:text="Last 7 days — avg drain per day"
+            android:textColor="@color/text_muted"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:id="@+id/historyWeekRowsContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="@color/card_bg"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <include
+                android:id="@+id/historyDayRow0"
+                layout="@layout/fragment_history_day_row" />
+            <include
+                android:id="@+id/historyDayRow1"
+                layout="@layout/fragment_history_day_row" />
+            <include
+                android:id="@+id/historyDayRow2"
+                layout="@layout/fragment_history_day_row" />
+            <include
+                android:id="@+id/historyDayRow3"
+                layout="@layout/fragment_history_day_row" />
+            <include
+                android:id="@+id/historyDayRow4"
+                layout="@layout/fragment_history_day_row" />
+            <include
+                android:id="@+id/historyDayRow5"
+                layout="@layout/fragment_history_day_row" />
+            <include
+                android:id="@+id/historyDayRow6"
+                layout="@layout/fragment_history_day_row" />
+        </LinearLayout>
+
+        <androidx.cardview.widget.CardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            app:cardBackgroundColor="@color/card_bg"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="0dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="DRAIN BY TIME OF DAY"
+                    android:textColor="@color/text_muted"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+
+                <com.example.myapplication.HistoryChartView
+                    android:id="@+id/historyHourlyChart"
+                    android:layout_width="match_parent"
+                    android:layout_height="100dp"
+                    android:layout_marginTop="10dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal"
+                    android:weightSum="5">
+
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="12am" android:textColor="@color/text_muted" android:textSize="10sp" android:gravity="start" />
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="6am" android:textColor="@color/text_muted" android:textSize="10sp" android:gravity="center" />
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="12pm" android:textColor="@color/text_muted" android:textSize="10sp" android:gravity="center" />
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="6pm" android:textColor="@color/text_muted" android:textSize="10sp" android:gravity="center" />
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="12am" android:textColor="@color/text_muted" android:textSize="10sp" android:gravity="end" />
+                </LinearLayout>
+            </LinearLayout>
+        </androidx.cardview.widget.CardView>
+    </LinearLayout>
+</ScrollView>
+
+

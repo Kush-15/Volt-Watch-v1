@@ -27,6 +27,8 @@ class BatteryLoggingForegroundService : Service() {
     private lateinit var dao: BatterySampleDao
     private lateinit var repository: BatteryRepository
     private var lastRecordedLevel: Int = LEVEL_UNINITIALIZED
+    private var lastScreenOffTimestampMs: Long = SCREEN_OFF_UNSET // Persisted screen-off timestamp for the idle helper.
+    private var lastScreenOnTimestampMs: Long = SCREEN_ON_UNSET // Persisted screen-on timestamp for the 3-minute UI grace period.
     private lateinit var prefs: android.content.SharedPreferences
 
     private val batteryChangedReceiver = object : BroadcastReceiver() {
@@ -106,12 +108,34 @@ class BatteryLoggingForegroundService : Service() {
         }
     }
 
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    val now = System.currentTimeMillis()
+                    persistScreenOffTimestamp(now) // Store the exact screen-off time immediately so idle mode survives restarts.
+                    persistLastActiveTimestamp(now) // Keep the latest active timestamp in SharedPreferences for helper-based recovery.
+                    Log.d(SERVICE_LOG_TAG, "Screen turned off; idle timer started")
+                }
+
+                Intent.ACTION_SCREEN_ON -> {
+                    val now = System.currentTimeMillis()
+                    persistScreenOnTimestamp(now) // Store the exact screen-on time immediately so the 3-minute grace window is measurable.
+                    persistLastActiveTimestamp(now) // Keep a durable "last active" timestamp for the helper.
+                    Log.d(SERVICE_LOG_TAG, "Screen turned on; grace-period timer started")
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         dao = BatteryDatabase.getInstance(applicationContext).batterySampleDao()
         repository = BatteryRepository(dao)
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         lastRecordedLevel = prefs.getInt(KEY_LAST_RECORDED_LEVEL, LEVEL_UNINITIALIZED)
+        lastScreenOffTimestampMs = prefs.getLong(KEY_LAST_SCREEN_OFF_TIME, prefs.getLong(LEGACY_KEY_LAST_SCREEN_OFF_TIMESTAMP, SCREEN_OFF_UNSET)) // Restore the persisted screen-off time across process restarts.
+        lastScreenOnTimestampMs = prefs.getLong(KEY_LAST_SCREEN_ON_TIME, SCREEN_ON_UNSET) // Restore the persisted screen-on time across process restarts.
         Log.d(SERVICE_LOG_TAG, "onCreate persistedBaseline=$lastRecordedLevel")
 
         // If no persisted baseline exists, seed from the most recent row in Room.
@@ -131,6 +155,7 @@ class BatteryLoggingForegroundService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification())
         Log.d(SERVICE_LOG_TAG, "startForeground completed notificationId=$NOTIFICATION_ID")
         registerBatteryReceiver()
+        registerScreenStateReceiver() // New: keep the screen-off timestamp current for idle-mode ETA capping.
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -142,6 +167,7 @@ class BatteryLoggingForegroundService : Service() {
     override fun onDestroy() {
         unregisterReceiverSafely()
         unregisterPowerReceiverSafely()
+        unregisterScreenReceiverSafely() // New: avoid leaking the screen-state receiver when the service stops.
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -346,9 +372,56 @@ class BatteryLoggingForegroundService : Service() {
         }
     }
 
+    private fun unregisterScreenReceiverSafely() {
+        try {
+            unregisterReceiver(screenStateReceiver)
+        } catch (_: IllegalArgumentException) {
+            // Receiver was already unregistered.
+        }
+    }
+
+    private fun registerScreenStateReceiver() {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenStateReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            ContextCompat.registerReceiver(
+                this,
+                screenStateReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        }
+        Log.d(SERVICE_LOG_TAG, "Registered screen state receiver")
+    }
+
     private fun persistLastRecordedLevel(level: Int) {
         lastRecordedLevel = level
         prefs.edit().putInt(KEY_LAST_RECORDED_LEVEL, level).apply()
+    }
+
+    private fun persistScreenOffTimestamp(timestampMs: Long) {
+        lastScreenOffTimestampMs = timestampMs
+        prefs.edit()
+            .putLong(KEY_LAST_SCREEN_OFF_TIME, timestampMs)
+            .putLong(LEGACY_KEY_LAST_SCREEN_OFF_TIMESTAMP, timestampMs)
+            .apply() // Persist the exact screen-off timestamp immediately for the idle helper.
+    }
+
+    private fun persistScreenOnTimestamp(timestampMs: Long) {
+        lastScreenOnTimestampMs = timestampMs
+        prefs.edit()
+            .putLong(KEY_LAST_SCREEN_ON_TIME, timestampMs)
+            .apply() // Persist the exact screen-on timestamp immediately for the 3-minute grace period.
+    }
+
+    private fun persistLastActiveTimestamp(timestampMs: Long) {
+        prefs.edit()
+            .putLong(KEY_LAST_ACTIVE_TIMESTAMP, timestampMs)
+            .apply() // Persist the latest active timestamp so helper logic survives service restarts.
     }
 
     private fun createNotificationChannel() {
@@ -383,7 +456,13 @@ class BatteryLoggingForegroundService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val PREFS_NAME = "battery_guard_monitoring"
         private const val KEY_LAST_RECORDED_LEVEL = "last_recorded_level"
+        private const val KEY_LAST_SCREEN_OFF_TIME = "last_screen_off_time" // Exact key required by the idle helper.
+        private const val KEY_LAST_SCREEN_ON_TIME = "last_screen_on_time" // Exact key required by the idle helper.
+        private const val KEY_LAST_ACTIVE_TIMESTAMP = "last_active_timestamp" // Exact key required by the idle helper.
+        private const val LEGACY_KEY_LAST_SCREEN_OFF_TIMESTAMP = "last_screen_off_timestamp" // Backward-compatible fallback for older app data.
         private const val LEVEL_UNINITIALIZED = -1
+        private const val SCREEN_OFF_UNSET = -1L // Sentinel used when no screen-off timestamp has been recorded yet.
+        private const val SCREEN_ON_UNSET = -1L // Sentinel used when no screen-on timestamp has been recorded yet.
         private const val STALE_LEVEL_JUMP_THRESHOLD_PERCENT = 5.0f
 
         fun start(context: Context) {

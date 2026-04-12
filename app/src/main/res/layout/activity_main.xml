@@ -1,227 +1,159 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/bg_dark"
-    android:fillViewport="true">
+    android:orientation="vertical"
+    android:fitsSystemWindows="false"
+    android:background="@color/bg_dark">
+
+    <TextView
+        android:id="@+id/screenTitleText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:paddingTop="8dp"
+        android:paddingBottom="12dp"
+        android:text="Volt Watch"
+        android:textColor="@color/text_primary"
+        android:textSize="15sp"
+        android:textStyle="bold" />
+
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <FrameLayout
+            android:id="@+id/homeScreenContainer"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <include layout="@layout/fragment_home" />
+        </FrameLayout>
+
+        <FrameLayout
+            android:id="@+id/historyScreenContainer"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone">
+
+            <include layout="@layout/fragment_history" />
+        </FrameLayout>
+
+        <FrameLayout
+            android:id="@+id/reportScreenContainer"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone">
+
+            <include layout="@layout/fragment_report" />
+        </FrameLayout>
+
+        <FrameLayout
+            android:id="@+id/commuteScreenContainer"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone">
+
+            <include layout="@layout/fragment_commute_check" />
+        </FrameLayout>
+    </FrameLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/nav_border" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:paddingStart="20dp"
-        android:paddingEnd="20dp"
-        android:paddingTop="40dp"
-        android:paddingBottom="32dp">
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:background="@color/bg_dark"
+        android:paddingTop="10dp"
+        android:paddingBottom="16dp">
 
-        <!-- ─── App Title ─── -->
-        <TextView
-            android:id="@+id/appTitle"
-            android:layout_width="match_parent"
+        <LinearLayout
+            android:id="@+id/homeTab"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:text="Battery Forecast"
-            android:textColor="@color/text_primary"
-            android:textSize="22sp"
-            android:fontFamily="sans-serif-medium"
-            android:letterSpacing="0.08"
+            android:layout_weight="1"
             android:gravity="center"
-            android:layout_marginBottom="32dp" />
+            android:orientation="vertical"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingVertical="4dp">
 
-        <!-- ─── Battery Icon + Percentage Card ─── -->
-        <androidx.cardview.widget.CardView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            app:cardBackgroundColor="@color/card_bg"
-            app:cardCornerRadius="24dp"
-            app:cardElevation="0dp">
+            <ImageView
+                android:id="@+id/homeTabIcon"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_home_nav"
+                android:tint="@color/accent_orange" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <TextView
+                android:id="@+id/homeTabLabel"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:paddingTop="32dp"
-                android:paddingBottom="32dp"
-                android:paddingStart="24dp"
-                android:paddingEnd="24dp">
+                android:text="Home"
+                android:textColor="@color/accent_orange"
+                android:textSize="10sp" />
+        </LinearLayout>
 
-                <!-- Canvas battery icon -->
-                <com.example.myapplication.BatteryIconView
-                    android:id="@+id/batteryIcon"
-                    android:layout_width="120dp"
-                    android:layout_height="60dp"
-                    android:layout_marginBottom="20dp" />
-
-                <!-- Large % number -->
-                <TextView
-                    android:id="@+id/batteryPercentText"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="—%"
-                    android:textColor="@color/battery_green"
-                    android:textSize="72sp"
-                    android:fontFamily="sans-serif-light"
-                    android:layout_marginBottom="4dp" />
-
-                <!-- Status label -->
-                <TextView
-                    android:id="@+id/batteryStatusText"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Initializing..."
-                    android:textColor="@color/text_secondary"
-                    android:textSize="14sp"
-                    android:fontFamily="sans-serif"
-                    android:letterSpacing="0.04" />
-
-            </LinearLayout>
-        </androidx.cardview.widget.CardView>
-
-        <!-- ─── Time Remaining Card ─── -->
-        <androidx.cardview.widget.CardView
-            android:layout_width="match_parent"
+        <LinearLayout
+            android:id="@+id/historyTab"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            app:cardBackgroundColor="@color/card_bg"
-            app:cardCornerRadius="24dp"
-            app:cardElevation="0dp">
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingVertical="4dp">
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <ImageView
+                android:id="@+id/historyTabIcon"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_history_nav"
+                android:tint="@color/nav_inactive" />
+
+            <TextView
+                android:id="@+id/historyTabLabel"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingTop="24dp"
-                android:paddingBottom="24dp"
-                android:paddingStart="24dp"
-                android:paddingEnd="24dp">
+                android:text="History"
+                android:textColor="@color/nav_inactive"
+                android:textSize="10sp" />
+        </LinearLayout>
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="ESTIMATED BATTERY LIFE"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="11sp"
-                    android:fontFamily="sans-serif-medium"
-                    android:letterSpacing="0.12"
-                    android:layout_marginBottom="8dp" />
-
-                <TextView
-                    android:id="@+id/timeRemainingText"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Calculating..."
-                    android:textColor="@color/text_primary"
-                    android:textSize="32sp"
-                    android:fontFamily="sans-serif-light"
-                    android:clickable="true"
-                    android:focusable="true"
-                    android:contentDescription="@string/eta_tap_to_refresh_description"
-                    android:layout_marginBottom="4dp" />
-
-                <TextView
-                    android:id="@+id/todText"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text=""
-                    android:textColor="@color/text_secondary"
-                    android:textSize="13sp"
-                    android:fontFamily="sans-serif" />
-
-            </LinearLayout>
-        </androidx.cardview.widget.CardView>
-
-        <!-- ─── Graph Card ─── -->
-        <androidx.cardview.widget.CardView
-            android:layout_width="match_parent"
+        <LinearLayout
+            android:id="@+id/reportTab"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            app:cardBackgroundColor="@color/card_bg"
-            app:cardCornerRadius="24dp"
-            app:cardElevation="0dp">
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingVertical="4dp">
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <ImageView
+                android:id="@+id/reportTabIcon"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@drawable/ic_report_nav"
+                android:tint="@color/nav_inactive" />
+
+            <TextView
+                android:id="@+id/reportTabLabel"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingTop="20dp"
-                android:paddingBottom="12dp"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="12dp">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="BATTERY HISTORY"
-                        android:textColor="@color/text_secondary"
-                        android:textSize="11sp"
-                        android:fontFamily="sans-serif-medium"
-                        android:letterSpacing="0.12" />
-
-                    <TextView
-                        android:id="@+id/sampleCountText"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text=""
-                        android:textColor="@color/text_secondary"
-                        android:textSize="11sp"
-                        android:fontFamily="sans-serif" />
-
-                </LinearLayout>
-
-                <com.example.myapplication.BatteryGraphView
-                    android:id="@+id/batteryGraph"
-                    android:layout_width="match_parent"
-                    android:layout_height="200dp"
-                    android:layout_marginBottom="8dp" />
-
-                <!-- Legend -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center"
-                    android:paddingTop="4dp">
-
-                    <View
-                        android:layout_width="24dp"
-                        android:layout_height="3dp"
-                        android:background="@color/battery_green"
-                        android:layout_marginEnd="6dp" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Recorded"
-                        android:textColor="@color/text_secondary"
-                        android:textSize="11sp"
-                        android:layout_marginEnd="20dp" />
-
-                    <View
-                        android:layout_width="24dp"
-                        android:layout_height="3dp"
-                        android:background="@color/battery_amber"
-                        android:layout_marginEnd="6dp" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Predicted"
-                        android:textColor="@color/text_secondary"
-                        android:textSize="11sp" />
-
-                </LinearLayout>
-
-            </LinearLayout>
-        </androidx.cardview.widget.CardView>
-
+                android:text="Report"
+                android:textColor="@color/nav_inactive"
+                android:textSize="10sp" />
+        </LinearLayout>
     </LinearLayout>
-</ScrollView>
+
+</LinearLayout>

@@ -104,15 +104,17 @@ class SessionManager(
         if (chronological.isEmpty()) return emptyList()
 
         val deduplicated = ArrayList<BatterySample>(chronological.size)
-        deduplicated.add(chronological[0]) // Always keep the first (oldest) sample in the session.
+        deduplicated.add(chronological[0]) // TIME HEARTBEAT FIX
 
         for (i in 1 until chronological.size) {
             val current = chronological[i]
             val previous = deduplicated.last()
 
-            // Only add if battery dropped (no flat lines, no charges that slipped through).
-            if (current.batteryLevel < previous.batteryLevel) {
-                deduplicated.add(current)
+            val dropped = current.batteryLevel < previous.batteryLevel // TIME HEARTBEAT FIX
+            val heartbeatPlateau = current.batteryLevel == previous.batteryLevel && (current.timestampEpochMillis - previous.timestampEpochMillis) > TIME_HEARTBEAT_MS // TIME HEARTBEAT FIX
+
+            if (dropped || heartbeatPlateau) { // TIME HEARTBEAT FIX
+                deduplicated.add(current) // TIME HEARTBEAT FIX
             }
         }
 
@@ -168,6 +170,7 @@ class SessionManager(
     companion object {
         // Data quality thresholds.
         private const val SESSION_RESET_RISE_THRESHOLD_PERCENT = 2.0f // >=2% rise indicates a new charge session.
+        private const val TIME_HEARTBEAT_MS = 30L * 60L * 1000L // TIME HEARTBEAT FIX
 
         // ML input constraints.
         private const val MIN_SAMPLES_FOR_PREDICTION = 5 // Need at least 5 samples to start ML.

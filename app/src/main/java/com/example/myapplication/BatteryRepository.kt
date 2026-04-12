@@ -30,8 +30,10 @@ class BatteryRepository(
      */
     suspend fun insertSample(sample: BatterySample): Long = withContext(ioDispatcher) {
         val latest = dao.getLatestSample()
-        // Storage-only rule: only insert if level dropped (gate duplicate writes).
-        if (latest == null || sample.batteryLevel < latest.batteryLevel) {
+        val sameLevelAsLatest = latest != null && sample.batteryLevel == latest.batteryLevel // TIME HEARTBEAT FIX
+        val heartbeatElapsed = latest != null && (sample.timestampEpochMillis - latest.timestampEpochMillis) > TIME_HEARTBEAT_MS // TIME HEARTBEAT FIX
+        // Storage-only rule: allow a plateau heartbeat after 30 minutes, but reject true duplicates and rises. // TIME HEARTBEAT FIX
+        if (latest == null || sample.batteryLevel < latest.batteryLevel || (sameLevelAsLatest && heartbeatElapsed)) { // TIME HEARTBEAT FIX
             val insertedId = dao.insertSample(sample)
             Log.d(
                 logTag,
@@ -149,6 +151,7 @@ class BatteryRepository(
 
     companion object {
         const val INSERT_SKIPPED_ID = -1L
+        private const val TIME_HEARTBEAT_MS = 30L * 60L * 1000L // TIME HEARTBEAT FIX
         // Raw fetch window: size to request from DAO (SessionManager will trim to 20 for ML).
         private const val RAW_FETCH_WINDOW_SIZE = 25
         // Storage cleanup only.
