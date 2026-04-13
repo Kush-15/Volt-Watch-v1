@@ -30,13 +30,16 @@ object BatteryAlertNotifier {
     private const val ALERT_ID_FAST_DRAIN = 1002
     private const val ALERT_ID_CHARGE_REMINDER = 1003
 
-    private const val PREFS_NAME = "volt_watch_alerts_prefs"
+    const val PREFS_NAME = "volt_watch_alerts_prefs"
     private const val KEY_CHARGING_ADVICE_SENT = "charging_advice_sent"
     private const val KEY_LAST_LEVEL = "last_level"
     private const val KEY_LAST_LEVEL_TS = "last_level_ts"
+    private const val KEY_LAST_IS_CHARGING = "last_is_charging"
     private const val KEY_LAST_FAST_DRAIN_ALERT_TS = "last_fast_drain_alert_ts"
     private const val KEY_LAST_CHARGE_REMINDER_ALERT_TS = "last_charge_reminder_alert_ts"
     private const val KEY_BEDTIME = "bedtime"
+    const val KEY_LAST_CHARGE_END_LEVEL = "last_charge_end_level"
+    const val KEY_LAST_CHARGE_END_TIME = "last_charge_end_time"
     const val KEY_LAST_ETA_MINUTES = "last_eta_minutes"
 
     private const val FAST_DRAIN_COOLDOWN_MS = 10L * 60L * 1000L
@@ -67,6 +70,14 @@ object BatteryAlertNotifier {
 
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
+        val wasCharging = prefs.getBoolean(KEY_LAST_IS_CHARGING, isCharging)
+
+        if (wasCharging && !isCharging) {
+            prefs.edit()
+                .putInt(KEY_LAST_CHARGE_END_LEVEL, level)
+                .putLong(KEY_LAST_CHARGE_END_TIME, now)
+                .apply()
+        }
 
         maybeSendChargingAdvice(context, prefs, level, isCharging)
         maybeSendFastDrainAlert(context, prefs, level, isCharging, now)
@@ -75,6 +86,7 @@ object BatteryAlertNotifier {
         prefs.edit()
             .putInt(KEY_LAST_LEVEL, level)
             .putLong(KEY_LAST_LEVEL_TS, now)
+            .putBoolean(KEY_LAST_IS_CHARGING, isCharging)
             .apply()
     }
 

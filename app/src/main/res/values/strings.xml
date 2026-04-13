@@ -12,6 +12,7 @@
     <string name="prediction_refreshing">Refreshing...</string>
     <string name="prediction_refreshed">Prediction refreshed</string>
     <string name="prediction_still_calculating">Still calculating...</string>
+    <string name="charging_label">Charging...</string>
 
     <string name="battery_good">Good</string>
     <string name="battery_low">Low battery</string>

@@ -152,7 +152,7 @@ class BatteryRepository(
     companion object {
         const val INSERT_SKIPPED_ID = -1L
         private const val TIME_HEARTBEAT_MS = 30L * 60L * 1000L // TIME HEARTBEAT FIX
-        // Raw fetch window: size to request from DAO (SessionManager will trim to 20 for ML).
+        // Raw fetch window: size to request from DAO (SessionManager will trim to 25 for ML).
         private const val RAW_FETCH_WINDOW_SIZE = 25
         // Storage cleanup only.
         private const val THIRTY_DAYS_MS = 30L * 24L * 60L * 60L * 1000L

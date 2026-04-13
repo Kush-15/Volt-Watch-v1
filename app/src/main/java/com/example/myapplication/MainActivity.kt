@@ -162,11 +162,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, true)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         setContentView(R.layout.activity_main)
 
         screenTitleText    = findViewById(R.id.screenTitleText)
+        val bottomNav = findViewById<View>(R.id.bottomNavigation)
         val titleBasePaddingTop = screenTitleText.paddingTop
+        val bottomNavBasePaddingBottom = bottomNav.paddingBottom
         ViewCompat.setOnApplyWindowInsetsListener(screenTitleText) { view, insets ->
             val topInset = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
             view.setPadding(
@@ -174,6 +176,16 @@ class MainActivity : AppCompatActivity() {
                 titleBasePaddingTop + topInset,
                 view.paddingRight,
                 view.paddingBottom
+            )
+            insets
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(bottomNav) { view, insets ->
+            val systemBarsInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(
+                view.paddingLeft,
+                view.paddingTop,
+                view.paddingRight,
+                bottomNavBasePaddingBottom + systemBarsInsets.bottom
             )
             insets
         }
@@ -312,10 +324,23 @@ class MainActivity : AppCompatActivity() {
                         wasChargingInPreviousTick = true
                     }
                     predictionJob?.cancel()
+
+                    val chargingLevel = sample?.batteryLevel
+                        ?: latestObservedBatteryLevel
+                        ?: readBatterySnapshot(this@MainActivity).level.toFloat()
+                    val chargingUiState = buildChargingUiState(chargingLevel)
+                    val chargingPredictionEpochMs = cachedSmoothedHours
+                        ?.takeIf {
+                            it > 0.0 &&
+                                it <= BatteryPredictionUiFormatter.UNREALISTIC_HOURS_THRESHOLD
+                        }
+                        ?.let { System.currentTimeMillis() + (it * 3_600_000.0).toLong() }
+
                     withContext(Dispatchers.Main) {
-                        batteryStatusText.text = "⚡ Charging..."
-                        timeRemainingText.text  = "⚡ Charging..."
-                        sampleCountText.text    = "Sampling paused"
+                        batteryStatusText.text = getString(R.string.charging_label)
+                        timeRemainingText.text  = getString(R.string.charging_label)
+                        sampleCountText.text = "${chargingUiState.sampleCount} samples"
+                        batteryGraph.setData(chargingUiState.graphPoints, chargingPredictionEpochMs)
                     }
                     delay(samplingIntervalMs)
                     continue
@@ -613,7 +638,32 @@ class MainActivity : AppCompatActivity() {
         level > 80f -> "Good"
         level > 50f -> "Normal"
         level > 20f -> "Low battery"
-        else        -> "Critical ⚠️"
+        else        -> "Critical"
+    }
+
+    private suspend fun buildChargingUiState(currentBatteryLevel: Float): ChargingUiState = withContext(Dispatchers.IO) {
+        val recentNonCharging = dao.getPredictionWindow(6)
+            .asReversed()
+            .filter { !it.isCharging }
+
+        val graphPoints = if (recentNonCharging.isNotEmpty()) {
+            BatteryGraphSanitizer.buildDisplayPoints(recentNonCharging)
+        } else {
+            buildFlatGraphPoints(currentBatteryLevel)
+        }
+
+        ChargingUiState(
+            sampleCount = dao.getNonChargingSampleCount(),
+            graphPoints = graphPoints
+        )
+    }
+
+    private fun buildFlatGraphPoints(currentBatteryLevel: Float): List<Pair<Long, Float>> {
+        val now = System.currentTimeMillis()
+        val clampedLevel = currentBatteryLevel.coerceIn(0f, 100f)
+        return List(6) { index ->
+            Pair(now - ((5 - index) * 60_000L), clampedLevel)
+        }
     }
 
     private fun updateCommuteCard() {
@@ -757,9 +807,16 @@ class MainActivity : AppCompatActivity() {
 
         val dayRows = dayKeys.map { key ->
             val daySamples = groupedByDay[key].orEmpty()
-            val maxLevel = daySamples.maxOfOrNull { it.batteryLevel }
-            val minLevel = daySamples.minOfOrNull { it.batteryLevel }
-            val drain = if (maxLevel != null && minLevel != null) (maxLevel - minLevel).coerceAtLeast(0f) else null
+            val sortedDay = daySamples.sortedBy { it.timestampEpochMillis }
+            var totalDrain = 0f
+            for (i in 1 until sortedDay.size) {
+                val prev = sortedDay[i - 1]
+                val cur = sortedDay[i]
+                if (!prev.isCharging && !cur.isCharging && cur.batteryLevel < prev.batteryLevel) {
+                    totalDrain += (prev.batteryLevel - cur.batteryLevel)
+                }
+            }
+            val drain = totalDrain.coerceIn(0f, 100f).takeIf { it > 0f }
             HistoryDayRowData(
                 dayLabel = key.dayLabel,
                 drainPercent = drain
@@ -811,29 +868,39 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildReportData(todaySamples: List<BatterySample>, totalCount: Int): ReportData {
         val trainingCount = cappedModelReadingsCount(totalCount)
-        if (todaySamples.isEmpty()) {
-            return ReportData(
-                totalDrain = getString(R.string.value_unavailable),
-                sinceLastCharge = getString(R.string.value_unavailable),
-                avgDrainRate = getString(R.string.value_unavailable),
-                screenOnTime = getString(R.string.value_unavailable),
-                timesCharged = "0x",
-                longestCharge = getString(R.string.value_unavailable),
-                heaviestUsage = getString(R.string.value_unavailable),
-                readingsCollected = getString(R.string.report_readings_collected_value, trainingCount),
-                confidence = confidenceLabel(trainingCount),
-                confidenceColor = confidenceColorForCount(trainingCount),
-                predictionAccuracy = "± ~5 min"
-            )
+        val alertPrefs = getSharedPreferences(BatteryAlertNotifier.PREFS_NAME, MODE_PRIVATE)
+        val startLevel = alertPrefs.getInt(BatteryAlertNotifier.KEY_LAST_CHARGE_END_LEVEL, -1)
+        val startTime = alertPrefs.getLong(BatteryAlertNotifier.KEY_LAST_CHARGE_END_TIME, 0L)
+        val currentLevel = latestObservedBatteryLevel?.toInt()
+            ?: todaySamples.lastOrNull()?.batteryLevel?.toInt()
+            ?: readBatterySnapshot(this).level.takeIf { it >= 0 }
+
+        val totalDrainPct = if (startLevel >= 0 && currentLevel != null) {
+            maxOf(0, startLevel - currentLevel)
+        } else {
+            null
         }
 
-        val first = todaySamples.first()
-        val last = todaySamples.last()
-        val elapsedMinutes = ((last.timestampEpochMillis - first.timestampEpochMillis) / 60_000.0).coerceAtLeast(0.0)
-        val totalDrainPct = (first.batteryLevel - last.batteryLevel).coerceAtLeast(0f)
+        val elapsedMinutesSinceCharge = if (startTime > 0L) {
+            ((System.currentTimeMillis() - startTime) / 60_000.0).coerceAtLeast(0.0)
+        } else {
+            null
+        }
 
-        val avgDrainRate = calculateAverageDrainPerMinute(todaySamples)
+        val avgDrainRateFromAnchor = if (
+            totalDrainPct != null &&
+            elapsedMinutesSinceCharge != null &&
+            elapsedMinutesSinceCharge > 0.0
+        ) {
+            totalDrainPct.toDouble() / elapsedMinutesSinceCharge
+        } else {
+            null
+        }
+
+        val avgDrainRate = avgDrainRateFromAnchor
             ?.let { getString(R.string.report_avg_drain_rate_value, it) }
+            ?: calculateAverageDrainPerMinute(todaySamples)
+                ?.let { getString(R.string.report_avg_drain_rate_value, it) }
             ?: getString(R.string.value_unavailable)
 
         var timesCharged = 0
@@ -865,7 +932,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (todaySamples.last().isCharging && currentChargeStart != null) {
+        if (todaySamples.lastOrNull()?.isCharging == true && currentChargeStart != null) {
             val durationMinutes = ((System.currentTimeMillis() - currentChargeStart) / 60_000L).coerceAtLeast(0L)
             longestChargeMinutes = maxOf(longestChargeMinutes, durationMinutes)
         }
@@ -878,11 +945,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         return ReportData(
-            totalDrain = "${totalDrainPct.toInt()}%",
-            sinceLastCharge = getString(
-                R.string.report_subtitle_format,
-                (elapsedMinutes / 60.0).toFloat()
-            ),
+            totalDrain = totalDrainPct?.let { "$it%" } ?: getString(R.string.value_unavailable),
+            sinceLastCharge = if (elapsedMinutesSinceCharge != null && elapsedMinutesSinceCharge > 0.0) {
+                getString(
+                    R.string.report_subtitle_format,
+                    (elapsedMinutesSinceCharge / 60.0).toFloat()
+                )
+            } else {
+                getString(R.string.value_unavailable)
+            },
             avgDrainRate = avgDrainRate,
             screenOnTime = getTodayScreenOnHoursText(),
             timesCharged = getString(R.string.report_times_charged_value, timesCharged),
@@ -1051,6 +1122,11 @@ class MainActivity : AppCompatActivity() {
         val confidence: String,
         val confidenceColor: Int,
         val predictionAccuracy: String
+    )
+
+    private data class ChargingUiState(
+        val sampleCount: Int,
+        val graphPoints: List<Pair<Long, Float>>
     )
 
 
