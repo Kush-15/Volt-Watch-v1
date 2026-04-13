@@ -50,6 +50,7 @@
     <string name="readings_collected">Readings collected</string>
     <string name="confidence">Confidence</string>
     <string name="prediction_accuracy">Prediction accuracy</string>
+    <string name="unplug_to_begin_tracking">Unplug your phone to begin tracking</string>
 
     <string name="commute_back">&#8249; Back</string>
     <string name="commute_title">Commute check</string>

@@ -69,6 +69,7 @@ class MainActivity : AppCompatActivity() {
         private const val MANUAL_REFRESH_THROTTLE_MS = 2_500L
         private const val MANUAL_REFRESH_VISUAL_DELAY_MS = 600L
         private const val ALERT_PREFS_NAME = "volt_watch_alerts_prefs"
+        private const val CHARGE_SESSION_DEBOUNCE_MS = 10 * 60 * 1000L
     }
 
     private lateinit var sampler: BatterySampler
@@ -869,11 +870,26 @@ class MainActivity : AppCompatActivity() {
     private fun buildReportData(todaySamples: List<BatterySample>, totalCount: Int): ReportData {
         val trainingCount = cappedModelReadingsCount(totalCount)
         val alertPrefs = getSharedPreferences(BatteryAlertNotifier.PREFS_NAME, MODE_PRIVATE)
-        val startLevel = alertPrefs.getInt(BatteryAlertNotifier.KEY_LAST_CHARGE_END_LEVEL, -1)
-        val startTime = alertPrefs.getLong(BatteryAlertNotifier.KEY_LAST_CHARGE_END_TIME, 0L)
+        val prefStartLevel = alertPrefs.getInt(BatteryAlertNotifier.KEY_LAST_CHARGE_END_LEVEL, -1)
+        val prefStartTime = alertPrefs.getLong(BatteryAlertNotifier.KEY_LAST_CHARGE_END_TIME, 0L)
         val currentLevel = latestObservedBatteryLevel?.toInt()
             ?: todaySamples.lastOrNull()?.batteryLevel?.toInt()
             ?: readBatterySnapshot(this).level.takeIf { it >= 0 }
+
+        val anchor = resolveReportAnchor(
+            prefStartLevel = prefStartLevel,
+            prefStartTime = prefStartTime,
+            todaySamples = todaySamples
+        )
+        val startLevel = anchor?.first ?: -1
+        val startTime = anchor?.second ?: 0L
+
+        if (anchor != null && (prefStartLevel < 0 || prefStartTime <= 0L)) {
+            alertPrefs.edit()
+                .putInt(BatteryAlertNotifier.KEY_LAST_CHARGE_END_LEVEL, startLevel)
+                .putLong(BatteryAlertNotifier.KEY_LAST_CHARGE_END_TIME, startTime)
+                .apply()
+        }
 
         val totalDrainPct = if (startLevel >= 0 && currentLevel != null) {
             maxOf(0, startLevel - currentLevel)
@@ -903,7 +919,7 @@ class MainActivity : AppCompatActivity() {
                 ?.let { getString(R.string.report_avg_drain_rate_value, it) }
             ?: getString(R.string.value_unavailable)
 
-        var timesCharged = 0
+        val timesCharged = countChargingSessions(todaySamples)
         var longestChargeMinutes = 0L
         var currentChargeStart: Long? = null
         val hourlyDrop = DoubleArray(24)
@@ -920,7 +936,6 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (!prev.isCharging && cur.isCharging) {
-                timesCharged += 1
                 currentChargeStart = cur.timestampEpochMillis
             } else if (prev.isCharging && !cur.isCharging) {
                 val start = currentChargeStart
@@ -951,6 +966,8 @@ class MainActivity : AppCompatActivity() {
                     R.string.report_subtitle_format,
                     (elapsedMinutesSinceCharge / 60.0).toFloat()
                 )
+            } else if (startLevel < 0) {
+                getString(R.string.unplug_to_begin_tracking)
             } else {
                 getString(R.string.value_unavailable)
             },
@@ -999,13 +1016,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun countChargingSessions(samples: List<BatterySample>): Int {
+        val sortedSamples = samples.sortedBy { it.timestampEpochMillis }
         var count = 0
-        for (i in 1 until samples.size) {
-            if (!samples[i - 1].isCharging && samples[i].isCharging) {
+        var lastAcceptedStart = Long.MIN_VALUE
+        for (i in 1 until sortedSamples.size) {
+            if (!sortedSamples[i - 1].isCharging && sortedSamples[i].isCharging) {
+                val transitionTime = sortedSamples[i].timestampEpochMillis
+                if (transitionTime - lastAcceptedStart < CHARGE_SESSION_DEBOUNCE_MS) {
+                    continue
+                }
                 count += 1
+                lastAcceptedStart = transitionTime
             }
         }
         return count
+    }
+
+    private fun resolveReportAnchor(
+        prefStartLevel: Int,
+        prefStartTime: Long,
+        todaySamples: List<BatterySample>
+    ): Pair<Int, Long>? {
+        if (prefStartLevel >= 0 && prefStartTime > 0L) {
+            return prefStartLevel to prefStartTime
+        }
+
+        val sorted = todaySamples.sortedBy { it.timestampEpochMillis }
+        for (i in sorted.lastIndex downTo 1) {
+            val prev = sorted[i - 1]
+            val cur = sorted[i]
+            if (prev.isCharging && !cur.isCharging) {
+                return cur.batteryLevel.toInt() to cur.timestampEpochMillis
+            }
+        }
+
+        val firstDischarge = sorted.firstOrNull { !it.isCharging }
+        return firstDischarge?.let { it.batteryLevel.toInt() to it.timestampEpochMillis }
     }
 
     private fun getTodayScreenOnHoursText(): String {

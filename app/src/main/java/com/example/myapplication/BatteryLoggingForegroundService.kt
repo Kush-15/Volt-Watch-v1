@@ -237,6 +237,9 @@ class BatteryLoggingForegroundService : Service() {
             )
 
             repository.insertStateSample(transitionSample)
+            if (!forceCharging) {
+                persistChargeEndAnchor(normalizedLevel, now)
+            }
             persistLastRecordedLevel(normalizedLevel)
             Log.d(
                 SERVICE_LOG_TAG,
@@ -424,6 +427,14 @@ class BatteryLoggingForegroundService : Service() {
         prefs.edit()
             .putLong(KEY_LAST_ACTIVE_TIMESTAMP, timestampMs)
             .apply() // Persist the latest active timestamp so helper logic survives service restarts.
+    }
+
+    private fun persistChargeEndAnchor(level: Int, timestampMs: Long) {
+        val alertPrefs = getSharedPreferences(BatteryAlertNotifier.PREFS_NAME, MODE_PRIVATE)
+        alertPrefs.edit()
+            .putInt(BatteryAlertNotifier.KEY_LAST_CHARGE_END_LEVEL, level)
+            .putLong(BatteryAlertNotifier.KEY_LAST_CHARGE_END_TIME, timestampMs)
+            .apply()
     }
 
     private fun createNotificationChannel() {
